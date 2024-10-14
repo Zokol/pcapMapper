@@ -1,6 +1,6 @@
-# Network Analysis Tool
+# pcapMapper
 
-This Python application is designed to give you a quick insight on the network traffic captured in pcap files. This tool was created to help evaluating the behavior of a device in network.
+This Python application is designed to give you a quick insight on the network traffic captured in pcap files.
 
 ## Features
 
