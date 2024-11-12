@@ -37,6 +37,22 @@ This Python application is designed to give you a quick insight on the network t
 python -m pip install -r requirements.txt
 ```
 
+## Filtering pcaps
+
+If you are dealing with large packet captures, you can use the included bash script to extract only the packets sent or received by the inspected device.
+The script also combines all of these packets into single pcap-file.
+
+Usage: 
+```bash
+extract_dut_packets.sh [IP_ADDRESS] [OUTPUT_FILE] [INPUT_FOLDER]
+```
+
+To extract and combine packets from `pcaps`-folder sent and received by 192.168.0.10:
+```bash
+extract_dut_packets.sh 192.168.0.10 dut_packets.pcap ./pcaps
+```
+
+
 ## Usage
 
 Basic syntax is:

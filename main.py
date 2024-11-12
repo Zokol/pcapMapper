@@ -3,6 +3,8 @@ import subprocess
 import click
 import os
 import re
+
+import numpy as np
 from geoip2.database import Reader
 from geoip2.errors import AddressNotFoundError
 import socket
@@ -12,6 +14,8 @@ DEBUG = False
 import requests
 import dns.resolver
 import pandas as pd
+
+from scapy.all import rdpcap, IP
 
 NAMESERVER_CSV_URL = "https://public-dns.info/nameservers.csv"
 
@@ -24,6 +28,35 @@ DNS_SERVER_SHORTLIST = {
     "Google": "8.8.8.8",
     "Cloudflare": "1.1.1.1"
 }
+
+
+def filter_pcap(dut_ip=None, dut_mac=None, dir=None, input_file=None, output_file=None, DEBUG=False):
+    if not input_file:
+        raise Exception("No pcap file given")
+
+    if not output_file:
+        output_file = input_file.split(".")[0] + "_filtered.pcap"
+
+    if not dir:
+        if dut_ip:
+            command = f"tshark -nnr {input_file} -f 'ip.addr == {dut_ip}' -w {output_file}"
+        elif dut_mac:
+            command = f"tshark -nnr {input_file} -Y 'eth.addr == {dut_mac}' -w {output_file}"
+        else:
+            raise Exception("No IP or MAC address given")
+    elif dir == "src" or dir == "dst":
+        if dut_ip:
+            command = f"tshark -nnr {input_file} -Y 'ip.{dir} == {dut_ip}' -w {output_file}"
+        elif dut_mac:
+            command = f"tshark -nnr {input_file} -Y 'eth.{dir} == {dut_mac}' -w {output_file}"
+        else:
+            raise Exception("No IP or MAC address given")
+    else:
+        raise Exception("Invalid direction given:", dir, "expected 'src' or 'dst'")
+
+    res = subprocess.run(command, shell=True, text=True, capture_output=True)
+    if DEBUG: print(f"Command: {command}\nStdout: {res.stdout}\nStderr: {res.stderr}")
+
 
 def read_nameserver_csv_from_url(url=NAMESERVER_CSV_URL):
     ## Convert CSV to pandas
@@ -196,6 +229,68 @@ def list_ips(pcap_file, dir, dut_ip=None, dut_mac=None):
 
     return list(set(new_ips))
 
+def get_ip_stats(pcap_file, dir, dut_ip=None, dut_mac=None):
+    # List IPs DUT recevies data from: `tshark -n -T fields -e ip.src -Y "ip.dst == $DUT_IP" -2 -r $PCAP_FILE | sort | uniq`
+    if dir == 'src':
+        res_dir = 'dst'
+    else:
+        res_dir = 'src'
+
+    if dut_ip:
+        command = f"tshark -n -T fields -e frame.len -e ip.proto -e ip.{res_dir} -R 'ip.{dir} == {dut_ip}' -2 -r {pcap_file}"
+    elif dut_mac:
+        command = f"tshark -n -T fields -e frame.len -e ip.proto -e ip.{res_dir} -R 'eth.{dir} == {dut_mac}' -2 -r {pcap_file}"
+    else:
+        raise Exception("No IP or MAC address given")
+    stats = subprocess.run(command, shell=True, text=True, capture_output=True)
+    if DEBUG: print(f"Command: {command}\nStdout: {stats.stdout}\nStderr: {stats.stderr}")
+    lines = stats.stdout.split("\n")
+
+    while '' in lines:
+        lines.remove('')
+
+    # Split each line into columns
+    data = [line.split('\t') for line in lines if line]
+
+    # Create a pandas DataFrame from the columns
+    df = pd.DataFrame(data, columns=['frame_len', 'ip_protocol', 'ip_address'])
+
+    # Replace empty strings with NaN
+    df.replace('', np.nan, inplace=True)
+
+    # Drop rows where any column has an empty value
+    df = df.dropna()
+
+    # Create a new DataFrame to store the results
+    new_df = pd.DataFrame(columns=df.columns)
+
+    # Iterate over the rows of the DataFrame
+    for index, row in df.iterrows():
+        if ',' in row['ip_protocol']:
+            # Split the value into two integers
+            values = row['ip_protocol'].split(',')
+            for value in values:
+                new_row = row.copy()
+                new_row['ip_protocol'] = value
+                new_df = pd.concat([new_df, pd.DataFrame([new_row])], ignore_index=True)
+        else:
+            new_df = pd.concat([new_df, pd.DataFrame([row])], ignore_index=True)
+
+    new_df['ip_protocol'] = new_df['ip_protocol'].astype(int)
+    new_df['frame_len'] = new_df['frame_len'].astype(int)
+
+    new_df["ip_protocol"].apply(proto_name_by_num)
+
+    result = {"protocols": {}, "protocols_by_ip": {}}
+    for name, group in new_df.groupby('ip_address'):
+        traffic = group.groupby('ip_protocol')['frame_len'].sum().to_dict()
+        location = get_geoip(name)
+        result["protocols_by_ip"][name] = {"location": location, "protocols": traffic}
+
+    result["protocols"] = new_df.groupby('ip_protocol')['frame_len'].sum().to_dict()
+
+    return result
+
 def get_protocol_stats(pcap_file, ip, dir):
     command = f"tshark -r {pcap_file} -Y 'ip.{dir} == {ip}' -T fields -e ip.proto -e frame.len"
     protocol_bytes = subprocess.run(command, shell=True, text=True, capture_output=True)
@@ -223,6 +318,62 @@ def get_protocol_stats(pcap_file, ip, dir):
 
     return protocols
 
+def get_protocol_stats_scapy(pcap_file, dir, dut_ip=None, dut_mac=None):
+    if dir == 'src':
+        res_dir = 'dst'
+    else:
+        res_dir = 'src'
+
+    # Read the pcap file
+    packets = rdpcap(pcap_file)
+
+    # List to store packet information
+    packet_info = []
+
+    # Iterate over each packet
+    for packet in packets:
+        if packet.haslayer(IP):
+            packet_data = {}
+            ip_src = packet[IP].src
+            ip_dst = packet[IP].dst
+
+            # Get the protocol stack
+            protocols = set()
+            layer = packet
+            while layer:
+                protocols.add(layer.name)
+                layer = layer.payload
+            packet_data['protocols'] = ', '.join(protocols)
+
+            if dir == 'src':
+                if dut_ip and ip_src != dut_ip:
+                    continue
+                elif dut_mac and packet.src != dut_mac:
+                    continue
+                packet_data['ip_address'] = ip_dst
+                if "TCP" in protocols:
+                    packet_data['port'] = packet.sprintf("%TCP.dport%")
+                elif "UDP" in protocols:
+                    packet_data['port'] = packet.sprintf("%UDP.dport%")
+            elif dir == 'dst':
+                if dut_ip and ip_dst != dut_ip:
+                    continue
+                elif dut_mac and packet.dst != dut_mac:
+                    continue
+                packet_data['ip_address'] = ip_src
+                if "TCP" in protocols:
+                    packet_data['port'] = packet.sprintf("%TCP.sport%")
+                elif "UDP" in protocols:
+                    packet_data['port'] = packet.sprintf("%UDP.sport%")
+            size = len(packet)
+            packet_data['frame_len'] = size
+            packet_info.append(packet_data)
+
+    # Convert the list of dictionaries to a pandas DataFrame
+    df = pd.DataFrame(packet_info)
+
+    return df
+
 def get_filtered_stats(pcap_file, dir, filter, dut_ip=None, dut_mac=None):
     if dut_ip:
         command = f"tshark -r {pcap_file} -Y '{filter} && ip.{dir} == {dut_ip}' -T fields -e frame.len | awk \'{{s+=$1}} END {{print s}}\'"
@@ -239,6 +390,7 @@ def get_filtered_stats(pcap_file, dir, filter, dut_ip=None, dut_mac=None):
         return int(bytes)
 
 @click.command()
+@click.option("--dut_name", help="The name of the device under test", default=None)
 @click.option("--ip", help="The IP address of the device under test", default=None)
 @click.option("--pcap_file", help="The path to the pcap file", callback=validate_input, default=None)
 @click.option("--pcap_folder", help="Path to folder containing pcaps", callback=validate_input, default=None)
@@ -248,9 +400,9 @@ def get_filtered_stats(pcap_file, dir, filter, dut_ip=None, dut_mac=None):
 @click.option("--resolve_mac", help="Resolves MAC for given IP", is_flag=True, default=False)
 @click.option("--resolve_ip", help="Resolves IP for given MAC", is_flag=True, default=False)
 @click.option("--resolve_global", help="Resolves IP of each domain using DNS of each country", is_flag=True, default=False)
-def run(ip, pcap_file, pcap_folder, output, mac, debug, resolve_mac, resolve_ip, resolve_global):
+def run(dut_name, ip, pcap_file, pcap_folder, output, mac, debug, resolve_mac, resolve_ip, resolve_global):
 
-    global DEBUG
+    global DEBUG, ip_stats
     DEBUG = debug
 
     # Get ip as parameter using click
@@ -262,6 +414,10 @@ def run(ip, pcap_file, pcap_folder, output, mac, debug, resolve_mac, resolve_ip,
     # Get output file as parameter using click
     OUTPUT_FILE = output
 
+    if not dut_name:
+        raise click.MissingParameter(param_hint="dut_name; Please provide the name of the device "
+                                                "under test")
+
     if PCAP_FOLDER:
         files = []
         # List all pcap files in the folder
@@ -269,19 +425,27 @@ def run(ip, pcap_file, pcap_folder, output, mac, debug, resolve_mac, resolve_ip,
         # Iterate over all pcap files
         for pcap_file in pcap_files:
             files.append(os.path.join(PCAP_FOLDER, pcap_file))
-            # List all domains in the pcap file
+
+    elif PCAP_FILE:
+        # check that the file exists
+        if not os.path.exists(PCAP_FILE):
+            raise FileNotFoundError(f"{PCAP_FILE} not found")
+        files = [PCAP_FILE]
 
     else:
-        files = [PCAP_FILE]
+        raise click.MissingParameter(param_hint="pcap_file or pcap_folder")
 
     domains = []
     ips = {"src": [], "dst": []}
     countries = {"src": [], "dst": []}
     protocols = {} # total bytes per protocol sent by DUT
+    ip_stats_dfs = {"src": [], "dst": []}
+    ip_stats = {"src": {}, "dst": {}}
     global_dns_routing = []
     for pcap_file in files:
         print(f"Processing {pcap_file}")
 
+        # Helper functions to quickly resolve IP or MAC address
         if resolve_mac:
             if not ip:
                 raise click.MissingParameter(param_hint="Please give IP address to resolve MAC address")
@@ -296,21 +460,31 @@ def run(ip, pcap_file, pcap_folder, output, mac, debug, resolve_mac, resolve_ip,
             print(f"IP addresses for MAC {mac} are {ips}")
             return
 
-        if not ip:
-            if mac:
+        # Resolve IP or MAC, if only one of them was given as a parameter
+        if mac:
+            if not ip:
                 dut_ips = find_ip_for_mac(pcap_file, mac)
-            else:
-                raise click.MissingParameter(param_hint="Please give IP or MAC address of the device under test")
-        else:
+                if not len(dut_ips):
+                    print("Given MAC does not match to any packets in this file. Skipping...")
+                    continue
+        elif ip:
             dut_ips = [ip]
-            mac = find_mac_for_ip(pcap_file, ip)
-            print("MAC address for DUT IP", ip, "is", mac)
+            if not mac:
+                dut_macs = find_mac_for_ip(pcap_file, ip)
+                if not len(dut_macs):
+                    print("Given IP does not match to any packets in this file. Skipping...")
+                    continue
+                mac = dut_macs.pop()
+        else:
+            raise click.MissingParameter(param_hint="Please give IP or MAC address of the device under test")
 
-        print(f"Device under test IPs: {dut_ips}")
-        if not len(dut_ips):
-            print("No IP addresses found for DUT in this file. Skipping...")
-            continue
+        assert len(dut_ips), "No IP-address could be defined"
+        assert mac, "No MAC-address could be defined"
 
+        print("Device under test IP:", dut_ips)
+        print("Device under test MAC:", mac)
+
+        """
         # Get IPs from pcap file
         ips["dst"] += list_ips(pcap_file, 'src', dut_mac=mac)
         if len(ips["dst"]) == 0:
@@ -318,11 +492,13 @@ def run(ip, pcap_file, pcap_folder, output, mac, debug, resolve_mac, resolve_ip,
             continue
         ips["src"] += list_ips(pcap_file, 'dst', dut_mac=mac)
         print(ips)
+        """
 
         # Get domains from pcap file
         domains += list_domains(pcap_file, dut_mac=mac)
         print(domains)
 
+        """
         # Get countries where DUT communicates to/from
         for ip in ips["src"]:
             try: countries["src"].append(get_geoip(ip))
@@ -333,28 +509,80 @@ def run(ip, pcap_file, pcap_folder, output, mac, debug, resolve_mac, resolve_ip,
             except AddressNotFoundError:
                 continue
         print(countries)
+        """
 
         # Get total bytes for each protocol from pcap file
+        """
         protos = ["http", "ssl", "telnet", "ldap", "dns", "ftp", "smtp", "dhcp", "icmp", "ssh"]
-        #protos = ["http", "ssl"]
         for proto in protos:
             print(f"Getting stats for {proto}")
             if proto not in protocols:
                 protocols[proto] = 0
             protocols[proto] += get_filtered_stats(pcap_file, 'src', proto, dut_mac=mac)
         print(protocols)
+        """
 
+        # Get IP statistics
+        ip_stats_dfs["src"].append(get_protocol_stats_scapy(pcap_file, 'src', dut_mac=mac))
+        ip_stats_dfs["dst"].append(get_protocol_stats_scapy(pcap_file, 'dst', dut_mac=mac))
+
+        # Get global DNS routing
         if resolve_global:
             for domain in domains:
                 global_dns_routing.append({"domain": domain, "routes": get_country_routes(domain)})
             print(global_dns_routing)
 
+    # combine ip statistics dataframes
+    df_src = pd.concat(ip_stats_dfs["src"])
+    df_dst = pd.concat(ip_stats_dfs["dst"])
+
+    # Calculate ip statistics
+    ip_stats["src"] = {"protocols": {}, "protocols_by_ip": {}}
+    for name, group in df_src.groupby('ip_address'):
+        port_traffic = group.groupby('port')['frame_len'].sum().to_dict()
+        protocol_stack_traffic = group.groupby('protocols')['frame_len'].sum().to_dict()
+        location = None
+        try:
+            location = get_geoip(name)
+        except AddressNotFoundError:
+            pass
+        ip_stats["src"]["protocols_by_ip"][name] = {
+            "ports": port_traffic,
+            "protocol_stack": protocol_stack_traffic,
+            "location": location
+        }
+
+    ip_stats["src"]["protocols"] = df_src.groupby('port')['frame_len'].sum().to_dict()
+
+    ip_stats["dst"] = {"protocols": {}, "protocols_by_ip": {}}
+    for name, group in df_dst.groupby('ip_address'):
+        port_traffic = group.groupby('port')['frame_len'].sum().to_dict()
+        protocol_stack_traffic = group.groupby('protocols')['frame_len'].sum().to_dict()
+        location = None
+        try:
+            location = get_geoip(name)
+        except AddressNotFoundError:
+            pass
+        ip_stats["dst"]["protocols_by_ip"][name] = {
+            "ports": port_traffic,
+            "protocol_stack": protocol_stack_traffic,
+            "location": location
+        }
+
+    ip_stats["dst"]["protocols"] = df_dst.groupby('port')['frame_len'].sum().to_dict()
+
     output = {
-        "domains": domains,
-        "ips": ips,
-        "countries": countries,
-        "protocols": protocols,
-        "global_routing": global_dns_routing
+        "dut": {
+            "name": dut_name,
+            "mac": mac,
+            "ip": dut_ips
+        },
+        "traffic_statistics": {
+            "domains": domains,
+            "countries": countries,
+            "protocols": ip_stats,
+            "global_routing": global_dns_routing
+        }
     }
 
     # Write the results to the output file
