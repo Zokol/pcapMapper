@@ -44,12 +44,12 @@ The script also combines all of these packets into single pcap-file.
 
 Usage: 
 ```bash
-extract_dut_packets.sh [IP_ADDRESS] [OUTPUT_FILE] [INPUT_FOLDER]
+extract_dut_packets.sh [ip|mac] [IP or MAC ADDRESS] [OUTPUT PCAP FILE] [INPUT PCAP FOLDER]
 ```
 
 To extract and combine packets from `pcaps`-folder sent and received by 192.168.0.10:
 ```bash
-extract_dut_packets.sh 192.168.0.10 dut_packets.pcap ./pcaps
+extract_dut_packets.sh ip 192.168.0.10 dut_packets.pcap ./pcaps
 ```
 
 

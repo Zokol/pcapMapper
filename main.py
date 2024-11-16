@@ -15,7 +15,10 @@ import requests
 import dns.resolver
 import pandas as pd
 
-from scapy.all import rdpcap, IP
+from scapy.all import *
+load_layer("tls")
+
+import scapy.layers.tls.crypto.suites as suites
 
 NAMESERVER_CSV_URL = "https://public-dns.info/nameservers.csv"
 
@@ -113,6 +116,15 @@ def get_geoip(ip):
             "lon": response.location.longitude
         }
         return result
+
+
+def get_cipher_name_by_value(cipher_value):
+    for name in dir(suites):
+        obj = getattr(suites, name)
+        if isinstance(obj, type) and hasattr(obj, 'val'):
+            if obj.val == cipher_value:
+                return name
+    return None
 
 def get_country_routes(domain):
     ## Read CSV from URL
@@ -330,6 +342,9 @@ def get_protocol_stats_scapy(pcap_file, dir, dut_ip=None, dut_mac=None):
     # List to store packet information
     packet_info = []
 
+    tls_ciphers = []
+    cert_key_lengths = []
+
     # Iterate over each packet
     for packet in packets:
         if packet.haslayer(IP):
@@ -344,6 +359,16 @@ def get_protocol_stats_scapy(pcap_file, dir, dut_ip=None, dut_mac=None):
                 protocols.add(layer.name)
                 layer = layer.payload
             packet_data['protocols'] = ', '.join(protocols)
+
+            # Find cipher name from Server Hello packets
+            if packet.haslayer(TLS):
+                tls_layer = packet[TLS]
+                if tls_layer.type == 22:
+                    if tls_layer.msg[0].msgtype == 2:
+                        cipher_value = tls_layer.fields["msg"][0].fields["cipher"]
+                        cipher_name = get_cipher_name_by_value(cipher_value)
+                        tls_ciphers.append(cipher_name)
+                    ## TODO: extract key length and trust chain from server hello packets
 
             if dir == 'src':
                 if dut_ip and ip_src != dut_ip:
