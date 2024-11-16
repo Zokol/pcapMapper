@@ -33,6 +33,26 @@ DNS_SERVER_SHORTLIST = {
 }
 
 
+def human_readable_size(size_bytes):
+    # Define the size units
+    units = ["B", "KB", "MB", "GB", "TB", "PB", "EB", "ZB", "YB"]
+
+    # Initialize the unit index
+    unit_index = 0
+
+    # Convert the size to the appropriate unit
+    while size_bytes >= 1024 and unit_index < len(units) - 1:
+        size_bytes /= 1024.0
+        unit_index += 1
+
+    # IF smallest unit is not selected, format the size to two decimal places and append the unit
+    if unit_index > 0:
+        human_readable = f"{size_bytes:.2f} {units[unit_index]}"
+    else:
+        human_readable = f"{size_bytes:.0f} {units[unit_index]}"
+
+    return human_readable
+
 def filter_pcap(dut_ip=None, dut_mac=None, dir=None, input_file=None, output_file=None, DEBUG=False):
     if not input_file:
         raise Exception("No pcap file given")
@@ -60,6 +80,14 @@ def filter_pcap(dut_ip=None, dut_mac=None, dir=None, input_file=None, output_fil
     res = subprocess.run(command, shell=True, text=True, capture_output=True)
     if DEBUG: print(f"Command: {command}\nStdout: {res.stdout}\nStderr: {res.stderr}")
 
+def normalize_mac(mac):
+    # Remove any delimiters (colons, semicolons, dashes, or spaces) and convert to lowercase
+    mac = re.sub(r'[:;.\s-]', '', mac.lower())
+
+    # Insert colons at the appropriate positions
+    normalized_mac = ':'.join(mac[i:i + 2] for i in range(0, len(mac), 2))
+
+    return normalized_mac
 
 def read_nameserver_csv_from_url(url=NAMESERVER_CSV_URL):
     ## Convert CSV to pandas
@@ -107,14 +135,23 @@ def resolve_ip(domain, dns_server_dataframe):
 
 def get_geoip(ip):
     with Reader("GeoLite2-City.mmdb") as reader:
-        response = reader.city(ip)
-        result = {
-            "ip": ip,
-            "city": response.city.name,
-            "country": response.country.iso_code,
-            "lat": response.location.latitude,
-            "lon": response.location.longitude
-        }
+        try:
+            response = reader.city(ip)
+            result = {
+                "ip": ip,
+                "city": response.city.name,
+                "country": response.country.iso_code,
+                "lat": response.location.latitude,
+                "lon": response.location.longitude
+            }
+        except AddressNotFoundError:
+            result = {
+                "ip": ip,
+                "city": "Unknown",
+                "country": "Unknown",
+                "lat": "Unknown",
+                "lon": "Unknown"
+            }
         return result
 
 
@@ -170,8 +207,9 @@ def find_ip_for_mac(pcap_file, dut_mac):
     ip_addresses = set()
     for packet in packets:
         if packet:
-            src = packet.strip()
-            ip_addresses.add(src)
+            src = packet.strip().split(',')
+            for ip in src:
+                ip_addresses.add(ip)
 
     return ip_addresses
 
@@ -330,6 +368,30 @@ def get_protocol_stats(pcap_file, ip, dir):
 
     return protocols
 
+def get_dns_requests(pcap_file, mac_address):
+    # Read the pcap file
+    packets = rdpcap(pcap_file)
+
+    # List to store domain and IP information
+    domain_ip_list = []
+
+    # Iterate over each packet
+    for packet in packets:
+        if packet.haslayer(DNS) and packet[DNS].qr == 1:  # DNS response
+            if packet.haslayer(Ether) and packet[Ether].dst == mac_address:
+                for i in range(packet[DNS].ancount):
+                    dnsrr = packet[DNS].an[i]
+                    if dnsrr.type == 1:  # A record
+                        domain = dnsrr.rrname.decode('utf-8')
+                        ip = dnsrr.rdata
+
+                        domain_ip_list.append({'domain': domain, 'ip': ip})
+
+    # Convert the list of dictionaries to a pandas DataFrame
+    df = pd.DataFrame(domain_ip_list)
+
+    return df
+
 def get_protocol_stats_scapy(pcap_file, dir, dut_ip=None, dut_mac=None):
     if dir == 'src':
         res_dir = 'dst'
@@ -342,9 +404,6 @@ def get_protocol_stats_scapy(pcap_file, dir, dut_ip=None, dut_mac=None):
     # List to store packet information
     packet_info = []
 
-    tls_ciphers = []
-    cert_key_lengths = []
-
     # Iterate over each packet
     for packet in packets:
         if packet.haslayer(IP):
@@ -353,22 +412,27 @@ def get_protocol_stats_scapy(pcap_file, dir, dut_ip=None, dut_mac=None):
             ip_dst = packet[IP].dst
 
             # Get the protocol stack
-            protocols = set()
+            protocols = ""
             layer = packet
             while layer:
-                protocols.add(layer.name)
+                if protocols == "":
+                    protocols += layer.name
+                else:
+                    protocols += " - " + layer.name
                 layer = layer.payload
-            packet_data['protocols'] = ', '.join(protocols)
+            packet_data['protocols'] = protocols
 
             # Find cipher name from Server Hello packets
+            packet_data['tls_cipher'] = None
             if packet.haslayer(TLS):
                 tls_layer = packet[TLS]
                 if tls_layer.type == 22:
                     if tls_layer.msg[0].msgtype == 2:
                         cipher_value = tls_layer.fields["msg"][0].fields["cipher"]
                         cipher_name = get_cipher_name_by_value(cipher_value)
-                        tls_ciphers.append(cipher_name)
-                    ## TODO: extract key length and trust chain from server hello packets
+                        packet_data['tls_cipher'] = cipher_name
+                        ## TODO: extract key length and trust chain from server hello packets
+
 
             if dir == 'src':
                 if dut_ip and ip_src != dut_ip:
@@ -391,7 +455,7 @@ def get_protocol_stats_scapy(pcap_file, dir, dut_ip=None, dut_mac=None):
                 elif "UDP" in protocols:
                     packet_data['port'] = packet.sprintf("%UDP.sport%")
             size = len(packet)
-            packet_data['frame_len'] = size
+            packet_data['packet_size'] = size
             packet_info.append(packet_data)
 
     # Convert the list of dictionaries to a pandas DataFrame
@@ -439,6 +503,10 @@ def run(dut_name, ip, pcap_file, pcap_folder, output, mac, debug, resolve_mac, r
     # Get output file as parameter using click
     OUTPUT_FILE = output
 
+    # First normalize mac address, if it was given
+    if mac:
+        mac = normalize_mac(mac)
+
     if not dut_name:
         raise click.MissingParameter(param_hint="dut_name; Please provide the name of the device "
                                                 "under test")
@@ -460,13 +528,15 @@ def run(dut_name, ip, pcap_file, pcap_folder, output, mac, debug, resolve_mac, r
     else:
         raise click.MissingParameter(param_hint="pcap_file or pcap_folder")
 
-    domains = []
+    domain_dfs = []
     ips = {"src": [], "dst": []}
     countries = {"src": [], "dst": []}
     protocols = {} # total bytes per protocol sent by DUT
     ip_stats_dfs = {"src": [], "dst": []}
     ip_stats = {"src": {}, "dst": {}}
-    global_dns_routing = []
+    tls_stats = {"ciphers": {}}
+    domains = []
+    #global_dns_routing = []
     for pcap_file in files:
         print(f"Processing {pcap_file}")
 
@@ -519,10 +589,6 @@ def run(dut_name, ip, pcap_file, pcap_folder, output, mac, debug, resolve_mac, r
         print(ips)
         """
 
-        # Get domains from pcap file
-        domains += list_domains(pcap_file, dut_mac=mac)
-        print(domains)
-
         """
         # Get countries where DUT communicates to/from
         for ip in ips["src"]:
@@ -547,72 +613,128 @@ def run(dut_name, ip, pcap_file, pcap_folder, output, mac, debug, resolve_mac, r
         print(protocols)
         """
 
+        # Get domains from pcap file
+        domain_dfs.append(get_dns_requests(pcap_file, mac))
+
         # Get IP statistics
         ip_stats_dfs["src"].append(get_protocol_stats_scapy(pcap_file, 'src', dut_mac=mac))
         ip_stats_dfs["dst"].append(get_protocol_stats_scapy(pcap_file, 'dst', dut_mac=mac))
 
+        """
         # Get global DNS routing
         if resolve_global:
             for domain in domains:
                 global_dns_routing.append({"domain": domain, "routes": get_country_routes(domain)})
             print(global_dns_routing)
+        """
 
-    # combine ip statistics dataframes
     df_src = pd.concat(ip_stats_dfs["src"])
+    if len(df_src) > 0:
+        ip_stats["src"] = analyze_protocol_stats(df_src)
+        countries["src"] = list(set([ip_stats["src"]["addresses"][ip]["location"]["country"] for ip in ip_stats["src"]["addresses"]]))
+
+        # Get unique domains
+        domain_df = pd.concat(domain_dfs)
+        if len(domain_df) > 0:
+            domains = list(domain_df['domain'].unique())
+
+            # Match domains to each IP in ip_stats
+            for ip in ip_stats["src"]["addresses"]:
+                if ip in domain_df['ip'].unique():
+                    ip_stats["src"]["addresses"][ip]["domains"] = list(domain_df[domain_df['ip'] == ip]['domain'])
+
+        else:
+            print("Warning: No DNS requests sent by DUT")
+
+    else:
+        print("Warning: No packets sent by DUT")
+
     df_dst = pd.concat(ip_stats_dfs["dst"])
+    if len(df_dst) > 0:
+        ip_stats["dst"] = analyze_protocol_stats(df_dst)
+        countries["dst"] = list(set([ip_stats["dst"]["addresses"][ip]["location"]["country"] for ip in ip_stats["dst"]["addresses"]]))
 
-    # Calculate ip statistics
-    ip_stats["src"] = {"protocols": {}, "protocols_by_ip": {}}
-    for name, group in df_src.groupby('ip_address'):
-        port_traffic = group.groupby('port')['frame_len'].sum().to_dict()
-        protocol_stack_traffic = group.groupby('protocols')['frame_len'].sum().to_dict()
-        location = None
-        try:
-            location = get_geoip(name)
-        except AddressNotFoundError:
-            pass
-        ip_stats["src"]["protocols_by_ip"][name] = {
-            "ports": port_traffic,
-            "protocol_stack": protocol_stack_traffic,
-            "location": location
-        }
+        # List all TLS ciphers
+        # Filter out all rows that don't have a TLS cipher, include all columns
+        cipher_df = df_dst.dropna(subset=['tls_cipher'])
+        tls_stats["ciphers"] = cipher_df.groupby('tls_cipher')['packet_size'].sum().to_dict()
 
-    ip_stats["src"]["protocols"] = df_src.groupby('port')['frame_len'].sum().to_dict()
-
-    ip_stats["dst"] = {"protocols": {}, "protocols_by_ip": {}}
-    for name, group in df_dst.groupby('ip_address'):
-        port_traffic = group.groupby('port')['frame_len'].sum().to_dict()
-        protocol_stack_traffic = group.groupby('protocols')['frame_len'].sum().to_dict()
-        location = None
-        try:
-            location = get_geoip(name)
-        except AddressNotFoundError:
-            pass
-        ip_stats["dst"]["protocols_by_ip"][name] = {
-            "ports": port_traffic,
-            "protocol_stack": protocol_stack_traffic,
-            "location": location
-        }
-
-    ip_stats["dst"]["protocols"] = df_dst.groupby('port')['frame_len'].sum().to_dict()
+    else:
+        print("Warning: No packets received by DUT")
 
     output = {
         "dut": {
             "name": dut_name,
             "mac": mac,
-            "ip": dut_ips
+            "ip": list(dut_ips)
         },
         "traffic_statistics": {
+            "tls": tls_stats,
             "domains": domains,
             "countries": countries,
-            "protocols": ip_stats,
-            "global_routing": global_dns_routing
+            "protocols": ip_stats
+            #"global_routing": global_dns_routing
         }
     }
+
+    import pprint
+    pp = pprint.PrettyPrinter(depth=4)
+    pp.pprint(output)
 
     # Write the results to the output file
     with open(OUTPUT_FILE, "w") as f:
         json.dump(output, f)
+
+def analyze_protocol_stats(df):
+
+    ip_stats = {"ports": {}, "TLS_ciphers": {}, "addresses": {}}
+
+    for name, group in df.groupby('ip_address'):
+        port_traffic = {}
+        for port, port_group in group.groupby('port'):
+
+            # Calculate total packet size for this port
+            bytes_per_port = port_group['packet_size'].sum()
+
+            port_traffic[port] = {
+                "total_bytes": human_readable_size(bytes_per_port),
+                "protocol_stacks": []
+            }
+
+            # group the port group by protocols
+            protocol_groups = port_group.groupby('protocols')
+
+            # calculate the total packet size for each protocol
+            for protocol, protocol_group in protocol_groups:
+                bytes_per_protocol_stack = protocol_group['packet_size'].sum()
+                ### Fetch all TLS ciphers associated with this IP
+                tls_ciphers = df[df['ip_address'] == name]['tls_cipher'].unique()
+                tls_ciphers = [item for item in tls_ciphers if item is not None]
+                tls_ciphers_str = None
+                if len(tls_ciphers) > 0:
+                    tls_ciphers_str = str(tls_ciphers[0])
+                if len(tls_ciphers) > 1:
+                    tls_ciphers_str = ', '.join(set(tls_ciphers))
+                port_traffic[port]["protocol_stacks"].append(
+                    {
+                        "protocol_stack": protocol,
+                        "total_bytes": human_readable_size(bytes_per_protocol_stack),
+                        #"tls": tls_ciphers_str
+                    }
+                )
+
+        location = get_geoip(name)
+
+        ip_stats["addresses"][name] = {
+            "ports": port_traffic,
+            "location": location
+        }
+
+    ip_stats["ports"] = df.groupby('port')['packet_size'].sum().to_dict()
+    for port in ip_stats["ports"]:
+        ip_stats["ports"][port] = human_readable_size(ip_stats["ports"][port])
+
+    return ip_stats
 
 if __name__ == "__main__":
     run()
