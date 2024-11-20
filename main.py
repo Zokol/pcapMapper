@@ -20,6 +20,7 @@ load_layer("tls")
 
 import scapy.layers.tls.crypto.suites as suites
 
+
 NAMESERVER_CSV_URL = "https://public-dns.info/nameservers.csv"
 
 DNS_SERVER_SHORTLIST = {
@@ -108,6 +109,16 @@ def get_dns_for_each_country(pandas_dataframe):
 
     return df
 
+def get_parameter_associated_with_ip(df, ip, param):
+    tls_ciphers = df[df['ip_address'] == ip][param].unique()
+    tls_ciphers = [item for item in tls_ciphers if item is not None]
+    tls_ciphers_str = None
+    if len(tls_ciphers) > 0:
+        tls_ciphers_str = str(tls_ciphers[0])
+    if len(tls_ciphers) > 1:
+        tls_ciphers_str = ', '.join(set(tls_ciphers))
+    return tls_ciphers_str
+
 def resolve_ip(domain, dns_server_dataframe):
     results = {}
 
@@ -154,6 +165,15 @@ def get_geoip(ip):
             }
         return result
 
+def get_tls_version_by_value(version_value):
+    lookup_table = {
+        0x0300: "SSL 3.0",
+        0x0301: "TLS 1.0",
+        0x0302: "TLS 1.1",
+        0x0303: "TLS 1.2",
+        0x0304: "TLS 1.3"
+    }
+    return lookup_table.get(version_value, None)
 
 def get_cipher_name_by_value(cipher_value):
     for name in dir(suites):
@@ -368,6 +388,9 @@ def get_protocol_stats(pcap_file, ip, dir):
 
     return protocols
 
+def get_whois_for_domain(domain):
+    raise NotImplemented
+
 def get_dns_requests(pcap_file, mac_address):
     # Read the pcap file
     packets = rdpcap(pcap_file)
@@ -424,9 +447,28 @@ def get_protocol_stats_scapy(pcap_file, dir, dut_ip=None, dut_mac=None):
 
             # Find cipher name from Server Hello packets
             packet_data['tls_cipher'] = None
+            packet_data['tls_version'] = None
             if packet.haslayer(TLS):
                 tls_layer = packet[TLS]
                 if tls_layer.type == 22:
+                    packet_data["tls_version"] = get_tls_version_by_value(tls_layer.version)
+                    ## check if tls_layer.msg[0] has attribute ext
+                    if hasattr(tls_layer.msg[0], 'ext'):
+                        for extension in tls_layer.msg[0].ext:
+                            """
+                            ## List extensions supported by client
+                            if isinstance(extension, TLS_Ext_SupportedVersion_CH):
+                                tls_versions = extension.fields["versions"]
+                                for tls_version in tls_versions:
+                                    tls_version_name = get_tls_version_by_value(tls_version)
+                                    if tls_version_name:
+                                        packet_data['tls_version'] = tls_version_name
+                            """
+                            if isinstance(extension, TLS_Ext_SupportedVersion_SH):
+                                tls_version = extension.fields["version"]
+                                tls_version_name = get_tls_version_by_value(tls_version)
+                                if tls_version_name:
+                                    packet_data['tls_version'] = tls_version_name
                     if tls_layer.msg[0].msgtype == 2:
                         cipher_value = tls_layer.fields["msg"][0].fields["cipher"]
                         cipher_name = get_cipher_name_by_value(cipher_value)
@@ -462,6 +504,45 @@ def get_protocol_stats_scapy(pcap_file, dir, dut_ip=None, dut_mac=None):
     df = pd.DataFrame(packet_info)
 
     return df
+
+from scapy.all import rdpcap, TCP, IP
+from scapy.layers.tls.all import TLS, TLSClientHello, TLSServerHello
+
+def parse_connections_from_pcap(file_path):
+    packets = rdpcap(file_path)
+    connections = {}
+
+    for packet in packets:
+        if IP in packet and TCP in packet:
+            ip_src = packet[IP].src
+            ip_dst = packet[IP].dst
+            port_src = packet[TCP].sport
+            port_dst = packet[TCP].dport
+            conn_id = (ip_src, port_src, ip_dst, port_dst)
+
+            if conn_id not in connections:
+                connections[conn_id] = {
+                    "ip_src": ip_src,
+                    "port_src": port_src,
+                    "ip_dst": ip_dst,
+                    "port_dst": port_dst,
+                    "tls_cipher": None,
+                    "tls_version": None,
+                    "data_transferred": 0
+                }
+
+            connections[conn_id]["data_transferred"] += len(packet)
+
+            if TLS in packet:
+                if TLSClientHello in packet:
+                    connections[conn_id]["tls_version"] = packet[TLS].version
+                elif TLSServerHello in packet:
+                    connections[conn_id]["tls_cipher"] = packet[TLS].cipher
+
+    df = pd.DataFrame(connections.values())
+
+    return df
+
 
 def get_filtered_stats(pcap_file, dir, filter, dut_ip=None, dut_mac=None):
     if dut_ip:
@@ -534,8 +615,10 @@ def run(dut_name, ip, pcap_file, pcap_folder, output, mac, debug, resolve_mac, r
     protocols = {} # total bytes per protocol sent by DUT
     ip_stats_dfs = {"src": [], "dst": []}
     ip_stats = {"src": {}, "dst": {}}
-    tls_stats = {"ciphers": {}}
+    tls_stats = {"ciphers": {}, "versions": {}}
     domains = []
+    connection_dfs = []
+    connections = []
     #global_dns_routing = []
     for pcap_file in files:
         print(f"Processing {pcap_file}")
@@ -628,7 +711,57 @@ def run(dut_name, ip, pcap_file, pcap_folder, output, mac, debug, resolve_mac, r
             print(global_dns_routing)
         """
 
-    df_src = pd.concat(ip_stats_dfs["src"])
+        connection_dfs.append(parse_connections_from_pcap(pcap_file))
+
+    # Combine the dataframes
+    df_src = pd.DataFrame()
+    df_dst = pd.DataFrame()
+
+    if len(ip_stats_dfs["src"]) > 0: df_src = pd.concat(ip_stats_dfs["src"])
+    if len(ip_stats_dfs["dst"]) > 0: df_dst = pd.concat(ip_stats_dfs["dst"])
+
+    if len(df_src) > 0 and len(df_dst) > 0:
+
+        # Combine the dataframes
+        df_connections = pd.concat(connection_dfs)
+
+        # Group the connections by destination IP and port. Sum amount of data and list TLS cipher and version if available
+        ##TODO
+
+        # If tls_cipher and tls_version exists in df
+        if 'tls_cipher' in df_src.columns and 'tls_version' in df_src.columns:
+            if 'tls_cipher' in df_dst.columns and 'tls_version' in df_dst.columns:
+                cipher_df_dst = df_dst.dropna(subset=['tls_cipher'])
+
+                # Enrich TLS information of ciphers to the source-side, as it can only be found from server hello packets
+                for name, group in cipher_df_dst.groupby('ip_address'):
+                    tls_cipher_str = get_parameter_associated_with_ip(group, name, 'tls_cipher')
+                    tls_version_str = get_parameter_associated_with_ip(group, name, 'tls_version')
+                    for port in group['port'].unique():
+                        df_src.loc[(df_src['ip_address'] == name) & (df_src['port'] == port), 'tls_cipher'] = tls_cipher_str
+                        df_dst.loc[(df_dst['ip_address'] == name) & (df_dst['port'] == port), 'tls_cipher'] = tls_cipher_str
+                        df_src.loc[(df_src['ip_address'] == name) & (df_src['port'] == port), 'tls_version'] = tls_version_str
+                        df_dst.loc[(df_dst['ip_address'] == name) & (df_dst['port'] == port), 'tls_version'] = tls_version_str
+
+                # Process enriched dataframes
+                cipher_df_src = df_src.dropna(subset=['tls_cipher'])
+                version_df_src = df_src.dropna(subset=['tls_version'])
+
+                cipher_df_dst = df_dst.dropna(subset=['tls_cipher'])
+                version_df_dst = df_dst.dropna(subset=['tls_version'])
+
+                # List all TLS ciphers
+                # Filter out all rows that don't have a TLS cipher, include all columns
+                cipher_df = pd.concat([cipher_df_src, cipher_df_dst])
+                version_df = pd.concat([version_df_src, version_df_dst])
+
+                tls_stats["ciphers"] = {}
+                for cipher in cipher_df.groupby('tls_cipher')['packet_size'].sum().to_dict():
+                    tls_stats["ciphers"][cipher] = human_readable_size(cipher_df.groupby('tls_cipher')['packet_size'].sum().to_dict()[cipher])
+                tls_stats["versions"] = {}
+                for version in version_df.groupby('tls_version')['packet_size'].sum().to_dict():
+                    tls_stats["versions"][version] = human_readable_size(version_df.groupby('tls_version')['packet_size'].sum().to_dict()[version])
+
     if len(df_src) > 0:
         ip_stats["src"] = analyze_protocol_stats(df_src)
         countries["src"] = list(set([ip_stats["src"]["addresses"][ip]["location"]["country"] for ip in ip_stats["src"]["addresses"]]))
@@ -637,6 +770,10 @@ def run(dut_name, ip, pcap_file, pcap_folder, output, mac, debug, resolve_mac, r
         domain_df = pd.concat(domain_dfs)
         if len(domain_df) > 0:
             domains = list(domain_df['domain'].unique())
+            ## TODO Add domain whois information
+            #for domain in domains:
+            #   whois = get_whois_for_domain(domain)
+            #   domains[domain]["whois"] = whois
 
             # Match domains to each IP in ip_stats
             for ip in ip_stats["src"]["addresses"]:
@@ -649,15 +786,24 @@ def run(dut_name, ip, pcap_file, pcap_folder, output, mac, debug, resolve_mac, r
     else:
         print("Warning: No packets sent by DUT")
 
-    df_dst = pd.concat(ip_stats_dfs["dst"])
+
     if len(df_dst) > 0:
         ip_stats["dst"] = analyze_protocol_stats(df_dst)
         countries["dst"] = list(set([ip_stats["dst"]["addresses"][ip]["location"]["country"] for ip in ip_stats["dst"]["addresses"]]))
 
-        # List all TLS ciphers
-        # Filter out all rows that don't have a TLS cipher, include all columns
-        cipher_df = df_dst.dropna(subset=['tls_cipher'])
-        tls_stats["ciphers"] = cipher_df.groupby('tls_cipher')['packet_size'].sum().to_dict()
+        # Get unique domains
+        domain_df = pd.concat(domain_dfs)
+        if len(domain_df) > 0:
+            domains = list(domain_df['domain'].unique())
+            ## TODO Add domain whois information
+            # for domain in domains:
+            #   whois = get_whois_for_domain(domain)
+            #   domains[domain]["whois"] = whois
+
+            # Match domains to each IP in ip_stats
+            for ip in ip_stats["dst"]["addresses"]:
+                if ip in domain_df['ip'].unique():
+                    ip_stats["dst"]["addresses"][ip]["domains"] = list(domain_df[domain_df['ip'] == ip]['domain'])
 
     else:
         print("Warning: No packets received by DUT")
@@ -685,9 +831,11 @@ def run(dut_name, ip, pcap_file, pcap_folder, output, mac, debug, resolve_mac, r
     with open(OUTPUT_FILE, "w") as f:
         json.dump(output, f)
 
+
+
 def analyze_protocol_stats(df):
 
-    ip_stats = {"ports": {}, "TLS_ciphers": {}, "addresses": {}}
+    ip_stats = {"ports": {}, "addresses": {}}
 
     for name, group in df.groupby('ip_address'):
         port_traffic = {}
@@ -696,10 +844,18 @@ def analyze_protocol_stats(df):
             # Calculate total packet size for this port
             bytes_per_port = port_group['packet_size'].sum()
 
+            tls_ciphers_str = get_parameter_associated_with_ip(group, name, 'tls_cipher')
+            tls_versions_str = get_parameter_associated_with_ip(group, name, 'tls_version')
+
             port_traffic[port] = {
                 "total_bytes": human_readable_size(bytes_per_port),
                 "protocol_stacks": []
             }
+
+            if tls_ciphers_str:
+                port_traffic[port]["tls_ciphers"] = tls_ciphers_str
+            if tls_versions_str:
+                port_traffic[port]["tls_versions"] = tls_versions_str
 
             # group the port group by protocols
             protocol_groups = port_group.groupby('protocols')
@@ -707,19 +863,10 @@ def analyze_protocol_stats(df):
             # calculate the total packet size for each protocol
             for protocol, protocol_group in protocol_groups:
                 bytes_per_protocol_stack = protocol_group['packet_size'].sum()
-                ### Fetch all TLS ciphers associated with this IP
-                tls_ciphers = df[df['ip_address'] == name]['tls_cipher'].unique()
-                tls_ciphers = [item for item in tls_ciphers if item is not None]
-                tls_ciphers_str = None
-                if len(tls_ciphers) > 0:
-                    tls_ciphers_str = str(tls_ciphers[0])
-                if len(tls_ciphers) > 1:
-                    tls_ciphers_str = ', '.join(set(tls_ciphers))
                 port_traffic[port]["protocol_stacks"].append(
                     {
                         "protocol_stack": protocol,
-                        "total_bytes": human_readable_size(bytes_per_protocol_stack),
-                        #"tls": tls_ciphers_str
+                        "total_bytes": human_readable_size(bytes_per_protocol_stack)
                     }
                 )
 
