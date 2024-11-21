@@ -20,6 +20,7 @@ load_layer("tls")
 
 import scapy.layers.tls.crypto.suites as suites
 
+import whois as whois_module
 
 NAMESERVER_CSV_URL = "https://public-dns.info/nameservers.csv"
 
@@ -108,6 +109,15 @@ def get_dns_for_each_country(pandas_dataframe):
     df = df.drop_duplicates(subset='country_code', keep='first')
 
     return df
+
+def get_whois_for_domain(domain):
+    try:
+        # Query WHOIS information for the domain
+        w = whois_module.whois(domain)
+        return w
+    except Exception as e:
+        print(f"Error retrieving WHOIS information for {domain}: {e}")
+        return None
 
 def get_parameter_associated_with_ip(df, ip, param):
     tls_ciphers = df[df['ip_address'] == ip][param].unique()
@@ -201,7 +211,9 @@ def get_country_routes(domain):
             data["dns"] = dns_country
             results.append({"src": data["dns"], "dst": data["country"]})
 
-    return results
+    df = pd.DataFrame(results)
+
+    return df
 
 def proto_name_by_num(proto_num):
     for name,num in vars(socket).items():
@@ -445,36 +457,12 @@ def get_protocol_stats_scapy(pcap_file, dir, dut_ip=None, dut_mac=None):
                 layer = layer.payload
             packet_data['protocols'] = protocols
 
-            # Find cipher name from Server Hello packets
-            packet_data['tls_cipher'] = None
             packet_data['tls_version'] = None
-            if packet.haslayer(TLS):
-                tls_layer = packet[TLS]
-                if tls_layer.type == 22:
-                    packet_data["tls_version"] = get_tls_version_by_value(tls_layer.version)
-                    ## check if tls_layer.msg[0] has attribute ext
-                    if hasattr(tls_layer.msg[0], 'ext'):
-                        for extension in tls_layer.msg[0].ext:
-                            """
-                            ## List extensions supported by client
-                            if isinstance(extension, TLS_Ext_SupportedVersion_CH):
-                                tls_versions = extension.fields["versions"]
-                                for tls_version in tls_versions:
-                                    tls_version_name = get_tls_version_by_value(tls_version)
-                                    if tls_version_name:
-                                        packet_data['tls_version'] = tls_version_name
-                            """
-                            if isinstance(extension, TLS_Ext_SupportedVersion_SH):
-                                tls_version = extension.fields["version"]
-                                tls_version_name = get_tls_version_by_value(tls_version)
-                                if tls_version_name:
-                                    packet_data['tls_version'] = tls_version_name
-                    if tls_layer.msg[0].msgtype == 2:
-                        cipher_value = tls_layer.fields["msg"][0].fields["cipher"]
-                        cipher_name = get_cipher_name_by_value(cipher_value)
-                        packet_data['tls_cipher'] = cipher_name
-                        ## TODO: extract key length and trust chain from server hello packets
-
+            packet_data['tls_cipher'] = None
+            tls_info = parse_tls(packet)
+            if tls_info:
+                packet_data['tls_version'] = tls_info['tls_version']
+                packet_data['tls_cipher'] = tls_info['tls_cipher']
 
             if dir == 'src':
                 if dut_ip and ip_src != dut_ip:
@@ -505,6 +493,45 @@ def get_protocol_stats_scapy(pcap_file, dir, dut_ip=None, dut_mac=None):
 
     return df
 
+
+def parse_tls(packet):
+    # Find cipher name from Server Hello packets
+    res = {}
+    res['tls_cipher'] = None
+    res['tls_version'] = None
+    if packet.haslayer(TLS):
+        tls_layer = packet[TLS]
+        if tls_layer.type == 22:
+            res["tls_version"] = get_tls_version_by_value(tls_layer.version)
+            ## check if tls_layer.msg[0] has attribute ext
+            if hasattr(tls_layer.msg[0], 'ext'):
+                for extension in tls_layer.msg[0].ext:
+                    """ TODO: add separate statistics for versions and ciphers supported by the client
+                    ## List extensions supported by client
+                    if isinstance(extension, TLS_Ext_SupportedVersion_CH):
+                        tls_versions = extension.fields["versions"]
+                        for tls_version in tls_versions:
+                            tls_version_name = get_tls_version_by_value(tls_version)
+                            if tls_version_name:
+                                packet_data['tls_version'] = tls_version_name
+                    """
+                    if isinstance(extension, TLS_Ext_SupportedVersion_SH):
+                        # Record the version selected by the server
+                        tls_version = extension.fields["version"]
+                        tls_version_name = get_tls_version_by_value(tls_version)
+                        if tls_version_name:
+                            res['tls_version'] = tls_version_name
+
+            if tls_layer.msg[0].msgtype == 2:
+                # Record the cipher selected by the server
+                cipher_value = tls_layer.fields["msg"][0].fields["cipher"]
+                cipher_name = get_cipher_name_by_value(cipher_value)
+                res['tls_cipher'] = cipher_name
+                ## TODO: extract key length and trust chain from server hello packets
+
+    return res
+
+
 from scapy.all import rdpcap, TCP, IP
 from scapy.layers.tls.all import TLS, TLSClientHello, TLSServerHello
 
@@ -533,11 +560,12 @@ def parse_connections_from_pcap(file_path):
 
             connections[conn_id]["data_transferred"] += len(packet)
 
-            if TLS in packet:
-                if TLSClientHello in packet:
-                    connections[conn_id]["tls_version"] = packet[TLS].version
-                elif TLSServerHello in packet:
-                    connections[conn_id]["tls_cipher"] = packet[TLS].cipher
+            connections[conn_id]["tls_version"] = None
+            connections[conn_id]["tls_cipher"] = None
+            tls_info = parse_tls(packet)
+            if tls_info:
+                connections[conn_id]["tls_version"] = tls_info['tls_version']
+                connections[conn_id]["tls_cipher"] = tls_info['tls_cipher']
 
     df = pd.DataFrame(connections.values())
 
@@ -619,7 +647,7 @@ def run(dut_name, ip, pcap_file, pcap_folder, output, mac, debug, resolve_mac, r
     domains = []
     connection_dfs = []
     connections = []
-    #global_dns_routing = []
+    global_dns_routing = []
     for pcap_file in files:
         print(f"Processing {pcap_file}")
 
@@ -703,15 +731,14 @@ def run(dut_name, ip, pcap_file, pcap_folder, output, mac, debug, resolve_mac, r
         ip_stats_dfs["src"].append(get_protocol_stats_scapy(pcap_file, 'src', dut_mac=mac))
         ip_stats_dfs["dst"].append(get_protocol_stats_scapy(pcap_file, 'dst', dut_mac=mac))
 
-        """
+        # Get TCP and TLS connections
+        connection_dfs.append(parse_connections_from_pcap(pcap_file))
+
         # Get global DNS routing
         if resolve_global:
             for domain in domains:
                 global_dns_routing.append({"domain": domain, "routes": get_country_routes(domain)})
             print(global_dns_routing)
-        """
-
-        connection_dfs.append(parse_connections_from_pcap(pcap_file))
 
     # Combine the dataframes
     df_src = pd.DataFrame()
@@ -738,6 +765,7 @@ def run(dut_name, ip, pcap_file, pcap_folder, output, mac, debug, resolve_mac, r
                     tls_cipher_str = get_parameter_associated_with_ip(group, name, 'tls_cipher')
                     tls_version_str = get_parameter_associated_with_ip(group, name, 'tls_version')
                     for port in group['port'].unique():
+                        #TODO Hacky hack hack, for more reliable statistics you should follow the actual connections.
                         df_src.loc[(df_src['ip_address'] == name) & (df_src['port'] == port), 'tls_cipher'] = tls_cipher_str
                         df_dst.loc[(df_dst['ip_address'] == name) & (df_dst['port'] == port), 'tls_cipher'] = tls_cipher_str
                         df_src.loc[(df_src['ip_address'] == name) & (df_src['port'] == port), 'tls_version'] = tls_version_str
@@ -770,10 +798,6 @@ def run(dut_name, ip, pcap_file, pcap_folder, output, mac, debug, resolve_mac, r
         domain_df = pd.concat(domain_dfs)
         if len(domain_df) > 0:
             domains = list(domain_df['domain'].unique())
-            ## TODO Add domain whois information
-            #for domain in domains:
-            #   whois = get_whois_for_domain(domain)
-            #   domains[domain]["whois"] = whois
 
             # Match domains to each IP in ip_stats
             for ip in ip_stats["src"]["addresses"]:
@@ -795,11 +819,6 @@ def run(dut_name, ip, pcap_file, pcap_folder, output, mac, debug, resolve_mac, r
         domain_df = pd.concat(domain_dfs)
         if len(domain_df) > 0:
             domains = list(domain_df['domain'].unique())
-            ## TODO Add domain whois information
-            # for domain in domains:
-            #   whois = get_whois_for_domain(domain)
-            #   domains[domain]["whois"] = whois
-
             # Match domains to each IP in ip_stats
             for ip in ip_stats["dst"]["addresses"]:
                 if ip in domain_df['ip'].unique():
@@ -818,8 +837,8 @@ def run(dut_name, ip, pcap_file, pcap_folder, output, mac, debug, resolve_mac, r
             "tls": tls_stats,
             "domains": domains,
             "countries": countries,
-            "protocols": ip_stats
-            #"global_routing": global_dns_routing
+            "protocols": ip_stats,
+            "global_routing": global_dns_routing
         }
     }
 

@@ -2,6 +2,9 @@
 
 This Python application is designed to give you a quick insight on the network traffic captured in pcap files.
 
+**Disclaimer: This project is currently under active development. Stability and functionality are not guaranteed at this stage. Use at your own risk.**
+
+
 ## Features
 
 - Resolve MAC address for a given IP address
