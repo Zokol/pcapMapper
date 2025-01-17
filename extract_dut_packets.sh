@@ -21,7 +21,7 @@ if [ "$FILTER_TYPE" == "ip" ]; then
 elif [ "$FILTER_TYPE" == "mac" ]; then
   FILTER_EXPR="eth.addr == $ADDRESS"
 else
-  echo "Invalid filter type. Use 'ip' or 'mac'."
+  echo "Invalid filter type. Use 'ip' or 'mac'"
   exit 1
 fi
 

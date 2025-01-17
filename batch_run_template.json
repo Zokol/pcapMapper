@@ -1,0 +1,13 @@
+[
+    {
+        "dut_name": "device_1",
+        "mac": "11:22:33:44:55:66",
+        "input-file": "pcaps/1_wifi_traffic.pcap",
+        "report-output-file": "reports/device/device_report.json"
+    },
+    {
+        "dut_name": "device_android_app",
+        "input-file": "pcaps/android_app_traffic.pcapng",
+        "report-output-file": "reports/app/device_app_report.json"
+    }
+]

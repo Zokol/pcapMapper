@@ -269,7 +269,7 @@ def list_domains(pcap_file, dut_ip=None, dut_mac=None):
     elif dut_mac:
         command = f"tshark -n -T fields -e dns.qry.name -R 'eth.src == {dut_mac} && dns.flags.response eq 0' -2 -r {pcap_file} | sort | uniq"
     else:
-        raise Exception("No IP or MAC address given")
+        command = f"tshark -n -T fields -e dns.qry.name -R 'dns.flags.response eq 0' -2 -r {pcap_file} | sort | uniq"
 
     ## List all domains in pcap using tshark
     domains = subprocess.run(command, shell=True, text=True, capture_output=True)
@@ -293,7 +293,8 @@ def list_ips(pcap_file, dir, dut_ip=None, dut_mac=None):
     elif dut_mac:
         command = f"tshark -n -T fields -e ip.{res_dir} -R 'eth.{dir} == {dut_mac}' -2 -r {pcap_file} | sort | uniq"
     else:
-        raise Exception("No IP or MAC address given")
+        command = f"tshark -n -T fields -e ip.{res_dir} -2 -r {pcap_file} | sort | uniq"
+
     ips = subprocess.run(command, shell=True, text=True, capture_output=True)
     if DEBUG: print(f"Command: {command}\nStdout: {ips.stdout}\nStderr: {ips.stderr}")
     ips = ips.stdout.split("\n")
@@ -323,7 +324,8 @@ def get_ip_stats(pcap_file, dir, dut_ip=None, dut_mac=None):
     elif dut_mac:
         command = f"tshark -n -T fields -e frame.len -e ip.proto -e ip.{res_dir} -R 'eth.{dir} == {dut_mac}' -2 -r {pcap_file}"
     else:
-        raise Exception("No IP or MAC address given")
+        command = f"tshark -n -T fields -e frame.len -e ip.proto -e ip.{res_dir} -2 -r {pcap_file}"
+
     stats = subprocess.run(command, shell=True, text=True, capture_output=True)
     if DEBUG: print(f"Command: {command}\nStdout: {stats.stdout}\nStderr: {stats.stderr}")
     lines = stats.stdout.split("\n")
@@ -413,14 +415,15 @@ def get_dns_requests(pcap_file, mac_address):
     # Iterate over each packet
     for packet in packets:
         if packet.haslayer(DNS) and packet[DNS].qr == 1:  # DNS response
-            if packet.haslayer(Ether) and packet[Ether].dst == mac_address:
-                for i in range(packet[DNS].ancount):
-                    dnsrr = packet[DNS].an[i]
-                    if dnsrr.type == 1:  # A record
-                        domain = dnsrr.rrname.decode('utf-8')
-                        ip = dnsrr.rdata
-
-                        domain_ip_list.append({'domain': domain, 'ip': ip})
+            if mac_address: # Check if we want to filter only DNS requests made from specific MAC address
+                if packet.haslayer(Ether) and not packet[Ether].dst == mac_address:
+                    continue
+            for i in range(packet[DNS].ancount):
+                dnsrr = packet[DNS].an[i]
+                if dnsrr.type == 1:  # A record
+                    domain = dnsrr.rrname.decode('utf-8')
+                    ip = dnsrr.rdata
+                    domain_ip_list.append({'domain': domain, 'ip': ip})
 
     # Convert the list of dictionaries to a pandas DataFrame
     df = pd.DataFrame(domain_ip_list)
@@ -465,20 +468,22 @@ def get_protocol_stats_scapy(pcap_file, dir, dut_ip=None, dut_mac=None):
                 packet_data['tls_cipher'] = tls_info['tls_cipher']
 
             if dir == 'src':
-                if dut_ip and ip_src != dut_ip:
-                    continue
-                elif dut_mac and packet.src != dut_mac:
-                    continue
+                if dut_ip or dut_mac:  # Check if DUT ip or mac is determined
+                    if dut_ip and ip_src != dut_ip:
+                        continue
+                    elif dut_mac and packet.src != dut_mac:
+                        continue
                 packet_data['ip_address'] = ip_dst
                 if "TCP" in protocols:
                     packet_data['port'] = packet.sprintf("%TCP.dport%")
                 elif "UDP" in protocols:
                     packet_data['port'] = packet.sprintf("%UDP.dport%")
             elif dir == 'dst':
-                if dut_ip and ip_dst != dut_ip:
-                    continue
-                elif dut_mac and packet.dst != dut_mac:
-                    continue
+                if dut_ip or dut_mac:  # Check if DUT ip or mac is determined
+                    if dut_ip and ip_dst != dut_ip:
+                        continue
+                    elif dut_mac and packet.dst != dut_mac:
+                        continue
                 packet_data['ip_address'] = ip_src
                 if "TCP" in protocols:
                     packet_data['port'] = packet.sprintf("%TCP.sport%")
@@ -578,7 +583,7 @@ def get_filtered_stats(pcap_file, dir, filter, dut_ip=None, dut_mac=None):
     elif dut_mac:
         command = f"tshark -r {pcap_file} -Y '{filter} && eth.{dir} == {dut_mac}' -T fields -e frame.len | awk \'{{s+=$1}} END {{print s}}\'"
     else:
-        raise Exception("No IP or MAC address given")
+        command = f"tshark -r {pcap_file} -Y '{filter}' -T fields -e frame.len | awk \'{{s+=$1}} END {{print s}}\'"
     bytes = subprocess.run(command, shell=True, text=True, capture_output=True)
     if DEBUG: print(f"Command: {command}\nStdout: {bytes.stdout}\nStderr: {bytes.stderr}")
     bytes = bytes.stdout.strip()
@@ -640,7 +645,7 @@ def run(dut_name, ip, pcap_file, pcap_folder, output, mac, debug, resolve_mac, r
     domain_dfs = []
     ips = {"src": [], "dst": []}
     countries = {"src": [], "dst": []}
-    protocols = {} # total bytes per protocol sent by DUT
+    protocols = {}  # total bytes per protocol sent by DUT
     ip_stats_dfs = {"src": [], "dst": []}
     ip_stats = {"src": {}, "dst": {}}
     tls_stats = {"ciphers": {}, "versions": {}}
@@ -648,6 +653,8 @@ def run(dut_name, ip, pcap_file, pcap_folder, output, mac, debug, resolve_mac, r
     connection_dfs = []
     connections = []
     global_dns_routing = []
+    dut_ips = None  # List of IPs DUT uses
+
     for pcap_file in files:
         print(f"Processing {pcap_file}")
 
@@ -682,47 +689,10 @@ def run(dut_name, ip, pcap_file, pcap_folder, output, mac, debug, resolve_mac, r
                     continue
                 mac = dut_macs.pop()
         else:
-            raise click.MissingParameter(param_hint="Please give IP or MAC address of the device under test")
+            print("WARNING: DUT IP or MAC not given, analyzing all connections. This may take a while...")
 
-        assert len(dut_ips), "No IP-address could be defined"
-        assert mac, "No MAC-address could be defined"
-
-        print("Device under test IP:", dut_ips)
-        print("Device under test MAC:", mac)
-
-        """
-        # Get IPs from pcap file
-        ips["dst"] += list_ips(pcap_file, 'src', dut_mac=mac)
-        if len(ips["dst"]) == 0:
-            print("No packets sent by DUT in this pcap file. Skipping...")
-            continue
-        ips["src"] += list_ips(pcap_file, 'dst', dut_mac=mac)
-        print(ips)
-        """
-
-        """
-        # Get countries where DUT communicates to/from
-        for ip in ips["src"]:
-            try: countries["src"].append(get_geoip(ip))
-            except AddressNotFoundError:
-                continue
-        for ip in ips["dst"]:
-            try: countries["dst"].append(get_geoip(ip))
-            except AddressNotFoundError:
-                continue
-        print(countries)
-        """
-
-        # Get total bytes for each protocol from pcap file
-        """
-        protos = ["http", "ssl", "telnet", "ldap", "dns", "ftp", "smtp", "dhcp", "icmp", "ssh"]
-        for proto in protos:
-            print(f"Getting stats for {proto}")
-            if proto not in protocols:
-                protocols[proto] = 0
-            protocols[proto] += get_filtered_stats(pcap_file, 'src', proto, dut_mac=mac)
-        print(protocols)
-        """
+        if dut_ips: print("Device under test IP:", dut_ips)
+        if mac: print("Device under test MAC:", mac)
 
         # Get domains from pcap file
         domain_dfs.append(get_dns_requests(pcap_file, mac))
@@ -755,7 +725,7 @@ def run(dut_name, ip, pcap_file, pcap_folder, output, mac, debug, resolve_mac, r
         # Group the connections by destination IP and port. Sum amount of data and list TLS cipher and version if available
         ##TODO
 
-        # If tls_cipher and tls_version exists in df
+        # If tls_cipher and tls_version exists in dataframes, enrich the source-side with the information
         if 'tls_cipher' in df_src.columns and 'tls_version' in df_src.columns:
             if 'tls_cipher' in df_dst.columns and 'tls_version' in df_dst.columns:
                 cipher_df_dst = df_dst.dropna(subset=['tls_cipher'])
@@ -825,13 +795,14 @@ def run(dut_name, ip, pcap_file, pcap_folder, output, mac, debug, resolve_mac, r
                     ip_stats["dst"]["addresses"][ip]["domains"] = list(domain_df[domain_df['ip'] == ip]['domain'])
 
     else:
-        print("Warning: No packets received by DUT")
+        if ip or mac:
+            print("Warning: No packets received by DUT")
+        else:
+            print("Warning: No packets to be processed")
 
     output = {
         "dut": {
             "name": dut_name,
-            "mac": mac,
-            "ip": list(dut_ips)
         },
         "traffic_statistics": {
             "tls": tls_stats,
@@ -841,6 +812,11 @@ def run(dut_name, ip, pcap_file, pcap_folder, output, mac, debug, resolve_mac, r
             "global_routing": global_dns_routing
         }
     }
+
+    if dut_ips:
+        output["dut"]["ip"] = list(dut_ips)
+    if mac:
+        output["dut"]["mac"] = mac
 
     import pprint
     pp = pprint.PrettyPrinter(depth=4)

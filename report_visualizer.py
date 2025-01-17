@@ -173,6 +173,9 @@ def visualize_protocols(protocols_data, save_path=None):
     # Group by name and direction
     df_highest_layer = df_highest_layer.groupby(['highest_layer', 'direction']).sum().reset_index()
 
+    # Filter out padding and Raw
+    df_highest_layer = df_highest_layer[df_highest_layer['highest_layer'] != 'Padding']
+    df_highest_layer = df_highest_layer[df_highest_layer['highest_layer'] != 'Raw']
 
     # Sort the DataFrame by size_bytes in descending order
     df_highest_layer = df_highest_layer.sort_values(by='size_bytes', ascending=False)
@@ -321,8 +324,8 @@ def visualize_domains(domains_data, save_path=None):
     sns.barplot(data=tld_counts, x='size_bytes', y='tld', hue='direction', orient='h')
     plt.xlabel(size_label)
     plt.xscale('log')
-    plt.ylabel('Top-Level Domain (TLD)')
-    plt.title('Domains Grouped by TLD')
+    plt.ylabel('Domain')
+    plt.title('Domains by usage')
     plt.grid(True, which="both", ls="--", linewidth=0.5)
     plt.tight_layout()
 
@@ -429,6 +432,9 @@ def visualize_domains_by_device(domains_data, save_path=None):
                 f"{tld_counts.loc[tld_counts['tld'] == domain, 'direction'].values[0]}, "
                 f"{tld_counts.loc[tld_counts['tld'] == domain, 'size_bytes'].values[0]}\n"
             )
+
+    # Remove [CDN] and [DNS], as they are not that interesting in this scope
+    tld_counts = tld_counts.loc[tld_counts['tld'].apply(lambda x: x not in ['[CDN]', '[DNS]'])]
 
     # Aggregate data
     df_agg = tld_counts.groupby('tld').agg(

@@ -55,6 +55,11 @@ To extract and combine packets from `pcaps`-folder sent and received by 192.168.
 extract_dut_packets.sh ip 192.168.0.10 dut_packets.pcap ./pcaps
 ```
 
+If you need to just merge all pcaps in the folder, you can use `mergecap`:
+```bash
+mergecap -w dut_packets.pcap ./pcaps/*.pcap
+```
+
 
 ## Usage
 
@@ -100,7 +105,7 @@ You can also use the following options:
 - `--resolve_ip`: Resolves IP for given MAC
 - `--resolve_global`: Resolves IP of each domain using DNS of each country
 
-## Output
+### Output
 
 The output of the application is a JSON file containing the following information:
 
@@ -109,3 +114,22 @@ The output of the application is a JSON file containing the following informatio
 - Geographical information about the IPs communicated with
 - Total bytes for each protocol
 - Global DNS routing information for each domain
+
+## Report visualizer
+
+To visualize several reports, for example devices belonging in same device category, `report_visualizer.py` can be used.
+
+### Usage:
+```bash
+python report_visualizer.py --path <path_to_report_folder>
+```
+
+### Output:
+
+* `countries_plot.png`: A bar chart showing the number of packets sent to each country.
+* `protocols_plot.png`: A pie chart showing the total bytes for each protocol.
+* `domains_plot.png`: A bar chart showing the number of packets sent to each domain.
+* `tls_versions_plot.png`: A pie chart showing the total bytes for each TLS version.
+* `tls_ciphers_plot.png`: A pie chart showing the total bytes for each TLS cipher.
+* `domains_by_device_plot.png`: A bar chart showing the number of packets sent to each domain by device.
+
