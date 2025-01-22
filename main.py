@@ -498,41 +498,43 @@ def get_protocol_stats_scapy(pcap_file, dir, dut_ip=None, dut_mac=None):
 
     return df
 
-
 def parse_tls(packet):
     # Find cipher name from Server Hello packets
     res = {}
     res['tls_cipher'] = None
     res['tls_version'] = None
+    res['tls_server_name'] = None
+    res['tls_supported_versions'] = None
     if packet.haslayer(TLS):
         tls_layer = packet[TLS]
-        if tls_layer.type == 22:
-            res["tls_version"] = get_tls_version_by_value(tls_layer.version)
-            ## check if tls_layer.msg[0] has attribute ext
-            if hasattr(tls_layer.msg[0], 'ext'):
-                for extension in tls_layer.msg[0].ext:
-                    """ TODO: add separate statistics for versions and ciphers supported by the client
-                    ## List extensions supported by client
-                    if isinstance(extension, TLS_Ext_SupportedVersion_CH):
+        if tls_layer.type == 22:  # TLS Handshake
+            res["tls_version"] = get_tls_version_by_value(tls_layer.version)  # Initial guess of TLS version used (without extension)
+            if hasattr(tls_layer.msg[0], 'ext'):  # Check if TLS packet uses extensions
+                for extension in tls_layer.msg[0].ext: # Go through all extensions
+                    if isinstance(extension, TLS_Ext_ServerName):  # Check if extension is Server Name
+                        server_name = extension.servernames[0].servername.decode('utf-8')
+                        res['server_name'] = server_name
+                    """
+                    if isinstance(extension, TLS_Ext_SupportedVersion_CH): ## Client Hello packet
                         tls_versions = extension.fields["versions"]
                         for tls_version in tls_versions:
                             tls_version_name = get_tls_version_by_value(tls_version)
                             if tls_version_name:
-                                packet_data['tls_version'] = tls_version_name
+                                res['tls_version'] = tls_version_name
                     """
-                    if isinstance(extension, TLS_Ext_SupportedVersion_SH):
-                        # Record the version selected by the server
+                    if isinstance(extension, TLS_Ext_SupportedVersion_SH): ## Server Hello packet
                         tls_version = extension.fields["version"]
                         tls_version_name = get_tls_version_by_value(tls_version)
                         if tls_version_name:
                             res['tls_version'] = tls_version_name
 
-            if tls_layer.msg[0].msgtype == 2:
-                # Record the cipher selected by the server
-                cipher_value = tls_layer.fields["msg"][0].fields["cipher"]
-                cipher_name = get_cipher_name_by_value(cipher_value)
-                res['tls_cipher'] = cipher_name
-                ## TODO: extract key length and trust chain from server hello packets
+            if hasattr(tls_layer.msg[0], 'msgtype'):
+                if tls_layer.msg[0].msgtype == 2:
+                    # Record the cipher selected by the server
+                    cipher_value = tls_layer.fields["msg"][0].fields["cipher"]
+                    cipher_name = get_cipher_name_by_value(cipher_value)
+                    res['tls_cipher'] = cipher_name
+                    ## TODO: extract key length and trust chain from server hello packets
 
     return res
 
@@ -560,6 +562,7 @@ def parse_connections_from_pcap(file_path):
                     "port_dst": port_dst,
                     "tls_cipher": None,
                     "tls_version": None,
+                    "tls_server_name": None,
                     "data_transferred": 0
                 }
 
@@ -571,6 +574,7 @@ def parse_connections_from_pcap(file_path):
             if tls_info:
                 connections[conn_id]["tls_version"] = tls_info['tls_version']
                 connections[conn_id]["tls_cipher"] = tls_info['tls_cipher']
+                connections[conn_id]["tls_server_name"] = tls_info['tls_server_name']
 
     df = pd.DataFrame(connections.values())
 
