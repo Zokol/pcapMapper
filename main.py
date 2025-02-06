@@ -512,8 +512,9 @@ def parse_tls(packet):
             if hasattr(tls_layer.msg[0], 'ext'):  # Check if TLS packet uses extensions
                 for extension in tls_layer.msg[0].ext: # Go through all extensions
                     if isinstance(extension, TLS_Ext_ServerName):  # Check if extension is Server Name
-                        server_name = extension.servernames[0].servername.decode('utf-8')
-                        res['server_name'] = server_name
+                        if len(extension.servernames):
+                            server_name = extension.servernames[0].servername.decode('utf-8')
+                            res['server_name'] = server_name
                     """
                     if isinstance(extension, TLS_Ext_SupportedVersion_CH): ## Client Hello packet
                         tls_versions = extension.fields["versions"]
