@@ -7,6 +7,7 @@ from glob import glob
 import tldextract
 import os
 import click
+import requests
 
 # Function to convert human-readable sizes to bytes
 def size_to_bytes(size_str):
@@ -115,6 +116,9 @@ def visualize_countries(countries_data, save_path=None):
     # Sort the DataFrame by size_bytes in descending order
     df = df.sort_values(by='size_bytes', ascending=False)
 
+    ## export dataframe as csv
+    df.to_csv(os.path.join(save_path, 'countries_plot.csv'), index=False)
+
     plt.figure(figsize=(10, 5))
     plt.xscale('log')
     plt.xlabel(size_label)
@@ -125,7 +129,7 @@ def visualize_countries(countries_data, save_path=None):
     plt.tight_layout()
 
     if save_path:
-        plt.savefig(save_path)
+        plt.savefig(os.path.join(save_path,'countries_plot.png'))
     else:
         plt.show()
 
@@ -180,6 +184,9 @@ def visualize_protocols(protocols_data, save_path=None):
     # Sort the DataFrame by size_bytes in descending order
     df_highest_layer = df_highest_layer.sort_values(by='size_bytes', ascending=False)
 
+    # Export dataframe as csv
+    df_highest_layer.to_csv(os.path.join(save_path,'protocols_plot.csv'), index=False)
+
     # Plot the data with size_bytes on the horizontal axis
     plt.figure(figsize=(10, 5))
     sns.barplot(data=df_highest_layer, x='size_bytes', y='highest_layer', hue='direction', orient='h')
@@ -191,7 +198,7 @@ def visualize_protocols(protocols_data, save_path=None):
     plt.tight_layout()
 
     if save_path:
-        plt.savefig(save_path)
+        plt.savefig(os.path.join(save_path,'protocols_plot.png'))
     else:
         plt.show()
 
@@ -284,12 +291,31 @@ def visualize_domains(domains_data, save_path=None):
         'phicdn.net',
         'shipup.co',
         'emb-api.com',
-        'one.one'
+        'one.one',
+        '127.net',
+        'ytimg.org',
+        'alibabadns.com',
+        'aliyuncs.com',
+        'aliyunga009.com',
+        'aws.com',
+        'awsglobalaccelerator.com',
+        'azure.com',
+        'bootstrapcdn.com',
+        'dvv.fi',
+        'fastly-edge.com',
+        'googleusercontent.com',
+        'helpshift.com',
+        'hinetcdn.com.tw',
+        'iot-dns.com',
+        'mozgcp.net',
+        'ndmdhs.com',
+        'netease.com',
+        'sina.com.cn'
     ]
 
     # Print separate csv log file of self-hosted service domains
     # Syntax: domain, direction, size_bytes
-    with open('self_hosted_services.csv', 'w') as f:
+    with open(os.path.join(save_path, 'self_hosted_services.csv'), 'w') as f:
         for domain in tld_counts.loc[tld_counts['tld'].apply(lambda x: x not in non_manufacturer_domains), 'tld']:
             f.write(
                 f"{domain}, "
@@ -319,6 +345,9 @@ def visualize_domains(domains_data, save_path=None):
     # Sort the DataFrame by size_bytes in descending order
     tld_counts = tld_counts.sort_values(by='size_bytes', ascending=False)
 
+    ## export dataframe as csv
+    tld_counts.to_csv(os.path.join(save_path,'domains_plot.csv'), index=False)
+
     # Plot the data with count of domains for each TLD on the horizontal axis
     plt.figure(figsize=(12, 6))
     sns.barplot(data=tld_counts, x='size_bytes', y='tld', hue='direction', orient='h')
@@ -330,7 +359,7 @@ def visualize_domains(domains_data, save_path=None):
     plt.tight_layout()
 
     if save_path:
-        plt.savefig(save_path)
+        plt.savefig(os.path.join(save_path,'domains_plot.png'))
     else:
         plt.show()
 
@@ -355,6 +384,7 @@ def visualize_domains_by_device(domains_data, save_path=None):
             'akamai.net',
             'akamaiedge.net',
             'cloudflare.com',
+            'bootstrapcdn.com',
         ],
         "[GOOGLE FIREBASE]": [
             'app-analytics-services.com.',
@@ -367,7 +397,9 @@ def visualize_domains_by_device(domains_data, save_path=None):
         "[DNS]": [
             'akadns.net',
             'apple-dns.net',
-            'one.one'
+            'one.one',
+            'iot-dns.com',
+            'alibabadns.com',
         ]
     }
 
@@ -416,16 +448,38 @@ def visualize_domains_by_device(domains_data, save_path=None):
         'akamai.net',
         'akamaiedge.net',
         'cloudflare.com',
-        'one.one'
+        'one.one',
+        '127.net',
+        'ytimg.org',
+        'alibabadns.com',
+        'aliyuncs.com',
+        'aliyunga009.com',
+        'aws.com',
+        'awsglobalaccelerator.com',
+        'azure.com',
+        'bootstrapcdn.com',
+        'dvv.fi',
+        'fastly-edge.com',
+        'googleusercontent.com',
+        'helpshift.com',
+        'hinetcdn.com.tw',
+        'iot-dns.com',
+        'mozgcp.net',
+        'ndmdhs.com',
+        'netease.com',
+        'sina.com.cn'
     ]
 
     tld_counts.loc[tld_counts['tld'].apply(lambda x: x not in non_manufacturer_domains), 'tld'] = '[SELF-HOSTED SERVICES]'
     for group, domains in domain_groups.items():
         tld_counts.loc[tld_counts['tld'].apply(lambda x: x in domains), 'tld'] = group
 
+    ## export dataframe as csv
+    tld_counts.to_csv(os.path.join(save_path,'domains_by_device.csv'), index=False)
+
     # Print separate csv log file of self-hosted service domains
     # Syntax: domain, direction, size_bytes
-    with open('self_hosted_services_by_device.csv', 'w') as f:
+    with open(os.path.join(save_path, 'self_hosted_services_by_device.csv'), 'w') as f:
         for domain in tld_counts.loc[tld_counts['tld'].apply(lambda x: x not in non_manufacturer_domains), 'tld']:
             f.write(
                 f"{domain}, "
@@ -447,38 +501,44 @@ def visualize_domains_by_device(domains_data, save_path=None):
     df_top_10 = df_agg.sort_values(by='num_devices', ascending=False).head(10)
 
     # Create bubble chart
-    fig = px.scatter(
-        df_top_10,
-        x='total_bytes_sent',
-        y='total_bytes_received',
-        size='num_devices',
-        color='tld',
-        hover_name='tld',
-        log_x=True,
-        log_y=True,
-        size_max=60,
-        labels={
-            'total_bytes_sent': 'Total Bytes Sent',
-            'total_bytes_received': 'Total Bytes Received',
-            'num_devices': 'Number of Devices'
-        },
-        title='Domain Communication Overview'
+    plt.figure(figsize=(12, 8))
+    scatter = plt.scatter(
+        df_top_10['total_bytes_sent'],
+        df_top_10['total_bytes_received'],
+        s=df_top_10['num_devices'] * 10,  # Adjust size scaling factor as needed
+        c=df_top_10['tld'].astype('category').cat.codes,  # Convert categories to numeric codes for coloring
+        cmap='viridis',  # Choose a colormap
+        alpha=0.6,
+        edgecolors='w',
+        linewidth=0.5
     )
 
-    # Add grid lines to illustrate logarithmic scale
-    fig.update_xaxes(showgrid=True, gridwidth=1, gridcolor='LightGray')
-    fig.update_yaxes(showgrid=True, gridwidth=1, gridcolor='LightGray')
+    # Add labels and title
+    plt.xlabel('Total Bytes Sent')
+    plt.ylabel('Total Bytes Received')
+    plt.title('Domain Communication Overview')
+    plt.xscale('log')
+    plt.yscale('log')
 
+    # Add grid lines to illustrate logarithmic scale
+    plt.grid(True, which="both", ls="--", linewidth=0.5)
+
+    # Add color bar
+    cbar = plt.colorbar(scatter)
+    cbar.set_label('TLD')
+
+    # Save or display the plot
     if save_path:
-        fig.write_image(save_path)
+        plt.savefig(os.path.join(save_path,'domains_by_device_plot.png'))
     else:
-        fig.show()
+        plt.show()
 
 def visualize_tls_ciphers(tls_data, save_path=None):
     df = pd.DataFrame(tls_data)
 
-    # If several ciphers are split with comma in one row, split them
-    ## TODO: Fix this in data aggregation, there is a bug in pcap parsing
+    if 'cipher' not in df.columns:
+        print("No TLS ciphers found in the data.")
+        return
 
     # Step 1: Split the 'cipher' column by comma
     df['cipher'] = df['cipher'].str.split(',')
@@ -491,6 +551,16 @@ def visualize_tls_ciphers(tls_data, save_path=None):
 
     # Step 4: Group by the 'cipher' column and sum the 'size_bytes'
     df = df.groupby('cipher', as_index=False)['size_bytes'].sum()
+
+    # Use https://ciphersuite.info to evaluate ciphersuite strength
+    for ciphersuite in df['cipher']:
+        URL = "https://ciphersuite.info/api/cs/" + ciphersuite
+        response = requests.get(URL)
+        if response.status_code == 200:
+            data = response.json()
+            df.loc[df['cipher'] == ciphersuite, 'security'] = data[ciphersuite]['security']
+        else:
+            df.loc[df['cipher'] == ciphersuite, 'security'] = 'Unknown'
 
     # Adjust the values and the label of the axis based on the data size
     max_size = df['size_bytes'].max()
@@ -512,6 +582,9 @@ def visualize_tls_ciphers(tls_data, save_path=None):
     # Sort the DataFrame by size_bytes in descending order
     df = df.sort_values(by='size_bytes', ascending=False)
 
+    ## export dataframe as csv
+    df.to_csv(os.path.join(save_path,'tls_ciphers_plot.csv'), index=False)
+
     # Plot the data with size_bytes on the horizontal axis
     plt.figure(figsize=(10, 5))
     sns.barplot(data=df, x='size_bytes', y='cipher', orient='h')
@@ -523,12 +596,16 @@ def visualize_tls_ciphers(tls_data, save_path=None):
     plt.tight_layout()
 
     if save_path:
-        plt.savefig(save_path)
+        plt.savefig(os.path.join(save_path,'tls_ciphers_plot.png'))
     else:
         plt.show()
 
 def visualize_tls_versions(tls_data, save_path=None):
     df = pd.DataFrame(tls_data)
+
+    if 'version' not in df.columns:
+        print("No TLS versions found in the data.")
+        return
 
     # If several ciphers are split with comma in one row, split them
     ## TODO: Fix this in data aggregation, there is a bug in pcap parsing
@@ -565,6 +642,9 @@ def visualize_tls_versions(tls_data, save_path=None):
     # Sort the DataFrame by size_bytes in descending order
     df = df.sort_values(by='size_bytes', ascending=False)
 
+    ## export dataframe as csv
+    df.to_csv(os.path.join(save_path,'tls_versions_plot.csv'), index=False)
+
     # Plot the data with size_bytes on the horizontal axis
     plt.figure(figsize=(10, 5))
     sns.barplot(data=df, x='size_bytes', y='version', orient='h')
@@ -576,18 +656,30 @@ def visualize_tls_versions(tls_data, save_path=None):
     plt.tight_layout()
 
     if save_path:
-        plt.savefig(save_path)
+        plt.savefig(os.path.join(save_path, 'tls_versions_plot.png'))
     else:
         plt.show()
 
 @click.command()
 @click.argument('path', type=click.Path(exists=True))
-def visualize_reports(path):
-    # Determine if the path is a directory or a file
-    if os.path.isdir(path):
-        report_files = glob(os.path.join(path, '*.json'))
-    else:
-        report_files = [path]
+@click.option('--save_path', type=click.Path(), help='Path to save the visualizations')
+@click.option('--recursive_search', is_flag=True, default=False, help='Do recursive search of json files in given path')
+def visualize_reports(path, save_path, recursive_search):
+    def fetch_all_json_files(path, report_files=[]):
+        # Determine if the path is a directory or a file
+        if os.path.isdir(path):
+            report_files.extend(glob(os.path.join(path, '*.json')))
+            ## Check if there are any subdirectories
+            subdirectories = [f for f in glob(os.path.join(path, '*')) if os.path.isdir(f)]
+            if subdirectories and recursive_search:
+                for subdirectory in subdirectories:
+                    report_files.extend(fetch_all_json_files(subdirectory, report_files))
+        else:
+            report_files = [path]
+        return report_files
+
+    report_files = fetch_all_json_files(path)
+    assert len(report_files) > 0, "No report .json-files found in the specified path."
 
     all_countries_data = []
     all_ports_data = []
@@ -605,14 +697,19 @@ def visualize_reports(path):
             all_domains_data.extend(domains_data)
             all_tls_data.extend(tls_data)
 
+    # check if save_path exists, create if not
+    if save_path:
+        if not os.path.exists(save_path):
+            os.makedirs(save_path)
+
     # Visualize aggregated data
-    visualize_countries(all_countries_data, save_path=os.path.join(path, 'countries_plot.png'))
-    visualize_protocols(all_protocols_data, save_path=os.path.join(path, 'protocols_plot.png'))
+    visualize_countries(all_countries_data, save_path=save_path)
+    visualize_protocols(all_protocols_data, save_path=save_path)
     #visualize_protocol_layers(all_protocols_data)
-    visualize_domains(all_domains_data, save_path=os.path.join(path, 'domains_plot.png'))
-    visualize_tls_versions(all_tls_data, save_path=os.path.join(path, 'tls_versions_plot.png'))
-    visualize_tls_ciphers(all_tls_data, save_path=os.path.join(path, 'tls_ciphers_plot.png'))
-    visualize_domains_by_device(all_domains_data, save_path=os.path.join(path, 'domains_by_device_plot.png'))
+    visualize_domains(all_domains_data, save_path=save_path)
+    visualize_tls_versions(all_tls_data, save_path=save_path)
+    visualize_tls_ciphers(all_tls_data, save_path=save_path)
+    visualize_domains_by_device(all_domains_data, save_path=save_path)
 
 if __name__ == '__main__':
     visualize_reports()
