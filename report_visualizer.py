@@ -8,6 +8,140 @@ import tldextract
 import os
 import click
 import requests
+import dns.resolver
+
+# Group common domains into categories
+DOMAIN_GROUPS = {
+    "[CDN]": [
+        'akamai.net',
+        'cloudfront.net',
+        'akamaiedge.net',
+        'gstatic.com',
+        'fastly.net',
+        'phicdn.net',
+        'aaplimg.com',
+        'akamai.net',
+        'akamaiedge.net',
+        'cloudflare.com',
+        'cloudflare.net',
+        'bootstrapcdn.com',
+        '127.net',
+        'hinetcdn.com.tw',
+    ],
+    "[GOOGLE]": [
+        'app-analytics-services.com',
+        'app-measurement.com',
+        'firebase.io.com',
+        'firebaseio.com',
+        'google.com',
+        'googleapis.com',
+        'googleusercontent.com',
+    ],
+    "[DNS]": [
+        'akadns.net',
+        'apple-dns.net',
+        'one.one',
+        'iot-dns.com',
+        'alibabadns.com',
+    ],
+    "[AWS]": [
+        'aws.com',
+        'awsglobalaccelerator.com',
+        'amazonaws.com',
+    ],
+    "[MICROSOFT]": [
+        'microsoft.com',
+        'github.com'
+        'azure.com',
+    ],
+    "[ALIBABA]": [
+        'alibabadns.com',
+        'aliyuncs.com',
+        'aliyunga009.com',
+        'aliyunga0019.com',
+    ]
+}
+
+# Group common nameservers into categories
+NAMESERVER_GROUPS = {
+    "[AWS]":
+    [
+        'awsdns'
+    ],
+    "[GOOGLE]":
+    [
+        'google',
+    ],
+}
+
+# Whitelist of domains operated by large and global companies (e.g. amazon, cloudflare or iotcplatform)
+NON_MANUFACTURER_DOMAINS = [
+    'amazonaws.com',
+    'ntp.org',
+    'iotcplatform.com',
+    'klarna.net',
+    'microsoft.com',
+    'lokalise.com.',
+    'apple.com',
+    'adobe.com',
+    'facebook.com',
+    'twitter.com',
+    'paypal.com',
+    'stripe.com',
+    'github.com',
+    'linkedin.com',
+    'dropbox.com',
+    'slack.com',
+    'zoom.us',
+    'zendesk.com',
+    'split.io.',
+    'leanplum.com',
+    'branch.io',
+    'googleapis.com',
+    'lokalise.com',
+    'privacy-center.org',
+    'gstatic.com',
+    'lokalise.co',
+    'shipup.co',
+    'emb-api.com',
+    'app-analytics-services.com',
+    'app-measurement.com',
+    'firebase.io.com',
+    'firebaseio.com',
+    'akadns.net',
+    'apple-dns.net',
+    'akamai.net',
+    'cloudfront.net',
+    'akamaiedge.net',
+    'fastly.net',
+    'phicdn.net',
+    'aaplimg.com',
+    'akamai.net',
+    'akamaiedge.net',
+    'cloudflare.com',
+    'one.one',
+    '127.net',
+    'ytimg.org',
+    'alibabadns.com',
+    'aliyuncs.com',
+    'aliyunga009.com',
+    'aws.com',
+    'awsglobalaccelerator.com',
+    'azure.com',
+    'bootstrapcdn.com',
+    'dvv.fi',
+    'fastly-edge.com',
+    'googleusercontent.com',
+    'helpshift.com',
+    'hinetcdn.com.tw',
+    'iot-dns.com',
+    'mozgcp.net',
+    'ndmdhs.com',
+    'netease.com',
+    'sina.com.cn',
+    'tuyaeu.com',
+    'ytimg.com'
+]
 
 # Function to convert human-readable sizes to bytes
 def size_to_bytes(size_str):
@@ -90,6 +224,7 @@ def parse_report(report, device_id=None):
 # Function to visualize countries by amount of data
 def visualize_countries(countries_data, save_path=None):
     df = pd.DataFrame(countries_data)
+
     # Filter out Unknown country
     df = df[df['country'] != 'Unknown']
 
@@ -119,7 +254,7 @@ def visualize_countries(countries_data, save_path=None):
     ## export dataframe as csv
     df.to_csv(os.path.join(save_path, 'countries_plot.csv'), index=False)
 
-    plt.figure(figsize=(10, 5))
+    plt.figure(figsize=(10, 6))
     plt.xscale('log')
     plt.xlabel(size_label)
     sns.barplot(data=df, x='size_bytes', y='country', hue='direction', orient='h')
@@ -188,7 +323,7 @@ def visualize_protocols(protocols_data, save_path=None):
     df_highest_layer.to_csv(os.path.join(save_path,'protocols_plot.csv'), index=False)
 
     # Plot the data with size_bytes on the horizontal axis
-    plt.figure(figsize=(10, 5))
+    plt.figure(figsize=(10, 6))
     sns.barplot(data=df_highest_layer, x='size_bytes', y='highest_layer', hue='direction', orient='h')
     plt.xscale('log')
     plt.xlabel(size_label)
@@ -234,96 +369,77 @@ def extract_tld(domain):
     ext = tldextract.extract(domain)
     return f"{ext.domain}.{ext.suffix}"
 
-def visualize_domains(domains_data, save_path=None):
-    df = pd.DataFrame(domains_data)
+## Check if domain is in one of the domain groups
+def tag_domain(domain):
+    for group_name in DOMAIN_GROUPS.keys():
+        if domain in DOMAIN_GROUPS[group_name]:
+            return group_name
+    for manufacturer_domain in NON_MANUFACTURER_DOMAINS:
+        if domain in manufacturer_domain:
+            return domain
+    for nameserver in get_nameservers(domain):
+        for group_name in NAMESERVER_GROUPS.keys():
+            for domain in NAMESERVER_GROUPS[group_name]:
+                if domain in nameserver:
+                    return group_name
+    return "[SELF-HOSTED SERVICES]"
 
+## Check if domain is in one of the domain groups
+def is_selfhosted(domain):
+    if tag_domain(domain) == "[SELF-HOSTED SERVICES]":
+        return True
+    return False
+
+## Define a function to query the nameservers for a given domain
+def get_nameservers(domain):
+    try:
+        answers = dns.resolver.resolve(domain, 'NS')
+        nameservers = [str(rdata.target) for rdata in answers]
+        return nameservers
+    except dns.resolver.NoAnswer:
+        return []
+    except dns.resolver.NXDOMAIN:
+        return []
+    except Exception as e:
+        print(f"An error occurred: {e}")
+        return []
+
+# Tag and filter domains
+def preprocess_domains(domains_data, save_path):
     # Extract TLD from each domain
-    df['tld'] = df['domain'].apply(extract_tld)
+    domains_data['tld'] = domains_data['domain'].apply(extract_tld)
 
     # Group by TLD and direction
-    tld_counts = df.groupby(['tld', 'direction', 'device_id']).sum().reset_index()
+    tld_counts = domains_data.groupby(['tld', 'direction', 'device_id']).sum().reset_index()
 
-    # Group manufacturer-owned (not amazon, cloudflare, iotcplatform or ntp) domains into single group
-    non_manufacturer_domains = [
-        'amazonaws.com',
-        'cloudflare.net',
-        'ntp.org',
-        'google.com',
-        'iotcplatform.com',
-        'klarna.net',
-        'microsoft.com',
-        'lokalise.com.',
-        'apple.com',
-        'akamai.net.',
-        'fastly.net',
-        'adobe.com',
-        'facebook.com',
-        'twitter.com',
-        'paypal.com',
-        'stripe.com',
-        'github.com',
-        'linkedin.com',
-        'dropbox.com',
-        'slack.com',
-        'zoom.us',
-        'zendesk.com',
-        'app-analytics-services.com.',
-        'app-measurement.com.',
-        'split.io.',
-        'firebase.io.com',
-        'leanplum.com',
-        'branch.io',
-        'akadns.net',
-        'apple-dns.net',
-        'googleapis.com',
-        'aaplimg.com',
-        'akamai.net',
-        'cloudfront.net',
-        'akamaiedge.net',
-        'lokalise.com',
-        'privacy-center.org',
-        'app-analytics-services.com',
-        'gstatic.com',
-        'lokalise.co',
-        'cloudflare.com',
-        'app-measurement.com',
-        'firebaseio.com',
-        'phicdn.net',
-        'shipup.co',
-        'emb-api.com',
-        'one.one',
-        '127.net',
-        'ytimg.org',
-        'alibabadns.com',
-        'aliyuncs.com',
-        'aliyunga009.com',
-        'aws.com',
-        'awsglobalaccelerator.com',
-        'azure.com',
-        'bootstrapcdn.com',
-        'dvv.fi',
-        'fastly-edge.com',
-        'googleusercontent.com',
-        'helpshift.com',
-        'hinetcdn.com.tw',
-        'iot-dns.com',
-        'mozgcp.net',
-        'ndmdhs.com',
-        'netease.com',
-        'sina.com.cn'
-    ]
+    # Replace common domains with group names
+    # First copy TLD to separate column
+    tld_counts['tld_orig'] = tld_counts['tld']
+
+    # Group domains using tag_domain-function
+    tld_counts['tld'] = tld_counts['tld_orig'].apply(tag_domain)
 
     # Print separate csv log file of self-hosted service domains
     # Syntax: domain, direction, size_bytes
     with open(os.path.join(save_path, 'self_hosted_services.csv'), 'w') as f:
-        for domain in tld_counts.loc[tld_counts['tld'].apply(lambda x: x not in non_manufacturer_domains), 'tld']:
+        ## Iterate all domains that are listed as self-hosted
+        for domain in tld_counts.loc[tld_counts['tld_orig'].apply(is_selfhosted), 'tld_orig']:
             f.write(
                 f"{domain}, "
-                f"{tld_counts.loc[tld_counts['tld'] == domain, 'direction'].values[0]}, "
-                f"{tld_counts.loc[tld_counts['tld'] == domain, 'size_bytes'].values[0]}\n"
+                f"{tld_counts.loc[tld_counts['tld_orig'] == domain, 'direction'].values[0]}, "
+                f"{tld_counts.loc[tld_counts['tld_orig'] == domain, 'size_bytes'].values[0]}\n"
             )
 
-    tld_counts.loc[tld_counts['tld'].apply(lambda x: x not in non_manufacturer_domains), 'tld'] = '[SELF-HOSTED SERVICES]'
+    # Remove [CDN] and [DNS], as they are not that interesting in this scope
+    tld_counts = tld_counts.loc[tld_counts['tld'].apply(lambda x: x not in ['[CDN]', '[DNS]'])]
+
+    return tld_counts
+
+def visualize_domains(domains_data, save_path=None):
+    df = pd.DataFrame(domains_data)
+
+    # preprocess domains
+    tld_counts = preprocess_domains(df, save_path)
 
     # Adjust the values and the label of the axis based on the data size
     max_size = tld_counts['size_bytes'].max()
@@ -366,129 +482,8 @@ def visualize_domains(domains_data, save_path=None):
 def visualize_domains_by_device(domains_data, save_path=None):
     df = pd.DataFrame(domains_data)
 
-    # Extract TLD from each domain
-    df['tld'] = df['domain'].apply(extract_tld)
-
-    # Group by TLD and direction
-    tld_counts = df.groupby(['tld', 'direction', 'device_id']).sum().reset_index()
-
-    domain_groups = {
-        "[CDN]": [
-            'akamai.net',
-            'cloudfront.net',
-            'akamaiedge.net',
-            'gstatic.com',
-            'fastly.net',
-            'phicdn.net',
-            'aaplimg.com',
-            'akamai.net',
-            'akamaiedge.net',
-            'cloudflare.com',
-            'bootstrapcdn.com',
-        ],
-        "[GOOGLE FIREBASE]": [
-            'app-analytics-services.com.',
-            'app-measurement.com.',
-            'firebase.io.com',
-            'firebaseio.com',
-            'google.com',
-            'googleapis.com',
-        ],
-        "[DNS]": [
-            'akadns.net',
-            'apple-dns.net',
-            'one.one',
-            'iot-dns.com',
-            'alibabadns.com',
-        ]
-    }
-
-    # Group manufacturer-owned (not amazon, cloudflare, iotcplatform or ntp) domains into single group
-    non_manufacturer_domains = [
-        'amazonaws.com',
-        'ntp.org',
-        'iotcplatform.com',
-        'klarna.net',
-        'microsoft.com',
-        'lokalise.com.',
-        'apple.com',
-        'adobe.com',
-        'facebook.com',
-        'twitter.com',
-        'paypal.com',
-        'stripe.com',
-        'github.com',
-        'linkedin.com',
-        'dropbox.com',
-        'slack.com',
-        'zoom.us',
-        'zendesk.com',
-        'split.io.',
-        'leanplum.com',
-        'branch.io',
-        'googleapis.com',
-        'lokalise.com',
-        'privacy-center.org',
-        'gstatic.com',
-        'lokalise.co',
-        'shipup.co',
-        'emb-api.com',
-        'app-analytics-services.com.',
-        'app-measurement.com.',
-        'firebase.io.com',
-        'firebaseio.com',
-        'akadns.net',
-        'apple-dns.net',
-        'akamai.net',
-        'cloudfront.net',
-        'akamaiedge.net',
-        'fastly.net',
-        'phicdn.net',
-        'aaplimg.com',
-        'akamai.net',
-        'akamaiedge.net',
-        'cloudflare.com',
-        'one.one',
-        '127.net',
-        'ytimg.org',
-        'alibabadns.com',
-        'aliyuncs.com',
-        'aliyunga009.com',
-        'aws.com',
-        'awsglobalaccelerator.com',
-        'azure.com',
-        'bootstrapcdn.com',
-        'dvv.fi',
-        'fastly-edge.com',
-        'googleusercontent.com',
-        'helpshift.com',
-        'hinetcdn.com.tw',
-        'iot-dns.com',
-        'mozgcp.net',
-        'ndmdhs.com',
-        'netease.com',
-        'sina.com.cn'
-    ]
-
-    tld_counts.loc[tld_counts['tld'].apply(lambda x: x not in non_manufacturer_domains), 'tld'] = '[SELF-HOSTED SERVICES]'
-    for group, domains in domain_groups.items():
-        tld_counts.loc[tld_counts['tld'].apply(lambda x: x in domains), 'tld'] = group
-
-    ## export dataframe as csv
-    tld_counts.to_csv(os.path.join(save_path,'domains_by_device.csv'), index=False)
-
-    # Print separate csv log file of self-hosted service domains
-    # Syntax: domain, direction, size_bytes
-    with open(os.path.join(save_path, 'self_hosted_services_by_device.csv'), 'w') as f:
-        for domain in tld_counts.loc[tld_counts['tld'].apply(lambda x: x not in non_manufacturer_domains), 'tld']:
-            f.write(
-                f"{domain}, "
-                f"{tld_counts.loc[tld_counts['tld'] == domain, 'direction'].values[0]}, "
-                f"{tld_counts.loc[tld_counts['tld'] == domain, 'size_bytes'].values[0]}\n"
-            )
-
-    # Remove [CDN] and [DNS], as they are not that interesting in this scope
-    tld_counts = tld_counts.loc[tld_counts['tld'].apply(lambda x: x not in ['[CDN]', '[DNS]'])]
+    # preprocess domains
+    tld_counts = preprocess_domains(df, save_path)
 
     # Aggregate data
     df_agg = tld_counts.groupby('tld').agg(
@@ -498,16 +493,19 @@ def visualize_domains_by_device(domains_data, save_path=None):
     ).reset_index()
 
     # Sort by number of devices and select top 10 domains
-    df_top_10 = df_agg.sort_values(by='num_devices', ascending=False).head(10)
+    df_top_10 = df_agg.sort_values(by='num_devices', ascending=False).head(20)
 
     # Create bubble chart
     plt.figure(figsize=(12, 8))
+    unique_tlds = df_top_10['tld'].unique()
+    colors = plt.cm.viridis([i / (len(unique_tlds) - 1) for i in range(len(unique_tlds))])
+    color_dict = dict(zip(unique_tlds, colors))
+
     scatter = plt.scatter(
         df_top_10['total_bytes_sent'],
         df_top_10['total_bytes_received'],
         s=df_top_10['num_devices'] * 10,  # Adjust size scaling factor as needed
-        c=df_top_10['tld'].astype('category').cat.codes,  # Convert categories to numeric codes for coloring
-        cmap='viridis',  # Choose a colormap
+        c=df_top_10['tld'].map(color_dict),  # Map TLDs to colors
         alpha=0.6,
         edgecolors='w',
         linewidth=0.5
@@ -523,13 +521,37 @@ def visualize_domains_by_device(domains_data, save_path=None):
     # Add grid lines to illustrate logarithmic scale
     plt.grid(True, which="both", ls="--", linewidth=0.5)
 
-    # Add color bar
-    cbar = plt.colorbar(scatter)
-    cbar.set_label('TLD')
+    # Add legend
+    for tld, color in color_dict.items():
+        plt.scatter([], [], c=[color], label=tld, alpha=0.6, edgecolors='w', linewidth=0.5)
+    plt.legend(title='TLD')
 
     # Save or display the plot
     if save_path:
-        plt.savefig(os.path.join(save_path,'domains_by_device_plot.png'))
+        plt.savefig(os.path.join(save_path, 'domains_by_device_scatter_plot.png'))
+    else:
+        plt.show()
+
+    ## Scale num_devices into percentage of total devices
+    df_agg['num_devices'] = df_agg['num_devices'] / df_agg['num_devices'].sum() * 100
+
+    # Sort by number of devices
+    df_agg = df_agg.sort_values(by='num_devices', ascending=False)
+
+    # Plot strengths
+    plt.figure(figsize=(10, 6))
+    sns.barplot(data=df_agg, x='num_devices', y='tld', orient='h')
+    plt.xlabel("Popularity (%)", fontsize=18)
+    plt.ylabel('Domain', fontsize=18)
+    plt.xticks(fontsize=15)
+    plt.yticks(fontsize=15)
+    plt.title('Most popular domains used by devices', fontsize=18)
+    plt.grid(True, which="both", ls="--", linewidth=0.5)
+    plt.tight_layout()
+
+    # Save or display the plot
+    if save_path:
+        plt.savefig(os.path.join(save_path, 'domains_by_device_plot.png'))
     else:
         plt.show()
 
@@ -582,21 +604,49 @@ def visualize_tls_ciphers(tls_data, save_path=None):
     # Sort the DataFrame by size_bytes in descending order
     df = df.sort_values(by='size_bytes', ascending=False)
 
+    # Convert size to percentage of usage
+    df['usage'] = df['size_bytes'] / df['size_bytes'].sum() * 100
+
     ## export dataframe as csv
     df.to_csv(os.path.join(save_path,'tls_ciphers_plot.csv'), index=False)
 
     # Plot the data with size_bytes on the horizontal axis
-    plt.figure(figsize=(10, 5))
+    plt.figure(figsize=(10, 6))
     sns.barplot(data=df, x='size_bytes', y='cipher', orient='h')
     plt.xscale('log')
-    plt.xlabel(size_label)
+    plt.xlabel("Usage (%)")
     plt.ylabel('Cipher')
-    plt.title('TLS Ciphers by Amount of Data')
+    plt.title('TLS Ciphers by Popularity', fontsize=18)
     plt.grid(True, which="both", ls="--", linewidth=0.5)
     plt.tight_layout()
 
     if save_path:
         plt.savefig(os.path.join(save_path,'tls_ciphers_plot.png'))
+    else:
+        plt.show()
+
+    # Group by security level
+    df = df.groupby('security', as_index=False)['size_bytes'].sum()
+
+    # Convert bytes to percentage of total
+    df['usage'] = df['size_bytes'] / df['size_bytes'].sum() * 100
+
+    # Sort the DataFrame by size_bytes in descending order
+    df = df.sort_values(by='usage', ascending=False)
+
+    # Plot strengths
+    plt.figure(figsize=(10, 6))
+    sns.barplot(data=df, x='usage', y='security', orient='h')
+    plt.xlabel("Usage (%)", fontsize=18)
+    plt.ylabel('Strength', fontsize=18)
+    plt.xticks(fontsize=15)
+    plt.yticks(fontsize=15)
+    plt.title('TLS Cipher strength (ciphersuite.info) by Percentage of Data', fontsize=18)
+    plt.grid(True, which="both", ls="--", linewidth=0.5)
+    plt.tight_layout()
+
+    if save_path:
+        plt.savefig(os.path.join(save_path,'tls_ciphers_strength_plot.png'))
     else:
         plt.show()
 
@@ -646,7 +696,7 @@ def visualize_tls_versions(tls_data, save_path=None):
     df.to_csv(os.path.join(save_path,'tls_versions_plot.csv'), index=False)
 
     # Plot the data with size_bytes on the horizontal axis
-    plt.figure(figsize=(10, 5))
+    plt.figure(figsize=(10, 6))
     sns.barplot(data=df, x='size_bytes', y='version', orient='h')
     plt.xscale('log')
     plt.xlabel(size_label)
